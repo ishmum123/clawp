@@ -1,0 +1,4 @@
+cw.sqlite
+.cw/
+__pycache__/
+*.pyc
