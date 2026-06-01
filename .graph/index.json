@@ -1,41 +1,41 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-06-01T00:00:00Z",
+  "generated_at": "2026-06-02T00:00:00Z",
   "entries": {
-    "file:cw.py": {
+    "file:clawp.py": {
       "level": "file",
-      "path": "cw.py",
-      "name": "cw.py",
-      "summary": "Single-file CLI that drives the interactive `claude` TUI through tmux and stores full-fidelity replies in SQLite. Entry point `main()` dispatches `ask`/`history`/`stop` subcommands; `ask()` acquires a per-session flock, calls `ensure_session()` to launch `claude --permission-mode <mode>` in a detached tmux pane, `send_text()` to bracketed-paste the prompt plus an INSTRUCTION to Write a verbatim answer to a `.cw/<turn-id>.md` scratch file, and `run_turn()` to poll for that file (falling back to lossy `scrape_reply()` on hang/dialog/timeout). Screen-state helpers `has_spinner`, `looks_blocked`, `at_idle_prompt` parse tmux captures; `init_db()` creates/migrates the `responses` table. Standard library only; never uses `claude -p`.",
-      "content_hash": "d9f6d97c84be1aa6",
-      "lines": "347",
+      "path": "clawp.py",
+      "name": "clawp.py",
+      "summary": "Single-file CLI `clawp`: a subscription-billed drop-in for `claude -p`. `main()` parses `clawp [flags] [prompt]` (prompt from arg or stdin) with no subcommands; `run_print_turn()` launches the interactive `claude` TUI in an ephemeral tmux pane via `ensure_session()` (with `--session-id <uuid>` or `--resume`), `send_text()`s the prompt verbatim (no injection), then tails Claude Code's transcript jsonl to capture the answer. A localized transcript-parser section (`find_transcript` glob-by-uuid, `read_records`, `assistant_text`, `final_answer`, `stream_event`, `TERMINAL_STOP`/`CONTINUATION_STOP`/`NOISE_TYPES`) holds all jsonl-schema knowledge; `scrape_reply()` is the schema-break fallback. Dual-signal completion (terminal stop_reason or screen-idle backstop), blocked/stall via screen helpers, `_log_turn()` to sqlite on every exit path, `--history` viewer. Never calls `claude -p`. Stdlib only.",
+      "content_hash": "b5316e29b42f531e",
+      "lines": "522",
       "children": []
     },
-    "file:test_cw.py": {
+    "file:test_clawp.py": {
       "level": "file",
-      "path": "test_cw.py",
-      "name": "test_cw.py",
-      "summary": "Plain assert-based test script (no test framework) exercising cw's pure screen-parsing helpers against fixture captures (DONE, WORKING, TRUST, PERMISSION). Validates `has_spinner`, `looks_blocked`, `at_idle_prompt`, and `scrape_reply`. Run directly with `python3 test_cw.py`; no live claude needed.",
-      "content_hash": "008d6cdb70ebf4e2",
-      "lines": "57",
+      "path": "test_clawp.py",
+      "name": "test_clawp.py",
+      "summary": "Plain assert-based test script (no framework) for clawp's pure helpers: screen parsing (`has_spinner`/`looks_blocked`/`at_idle_prompt`/`scrape_reply`), the transcript parser (terminal vs continuation stop_reason, noise/compaction skipping, thinking-block exclusion, `final_answer`, `stream_event` ordering), and `claude_version`. Uses inline dict/record fixtures mirroring real transcript shapes. Run with `python3 test_clawp.py`; no live claude needed.",
+      "content_hash": "a7aa46103339aff8",
+      "lines": "176",
       "children": []
     },
     "file:README.md": {
       "level": "file",
       "path": "README.md",
       "name": "README.md",
-      "summary": "End-user documentation: rationale (subscription vs Agent SDK credit billing), requirements (claude, tmux, python3), install as a single file, usage of ask/history/stop, the ask flags table, a how-it-works walkthrough, limitations, and roadmap. MIT licensed.",
-      "content_hash": "14e2a491614d4c7b",
-      "lines": "73",
+      "summary": "End-user docs for clawp: rationale (subscription vs Agent SDK credit billing), requirements (claude, tmux, python3), single-file install (`ln -s clawp.py`), usage as a `claude -p` drop-in (`clawp \"prompt\"`, stdin, `--output-format json/stream-json`, `--resume`, `--history`), how-it-works (transcript capture, verbatim prompt, no scratch file), stored sqlite columns, limitations, roadmap. MIT.",
+      "content_hash": "d17670bb3e481ec2",
+      "lines": "85",
       "children": []
     },
     "file:CLAUDE.md": {
       "level": "file",
       "path": "CLAUDE.md",
       "name": "CLAUDE.md",
-      "summary": "Guidance for Claude Code working in this repo. Documents the two design rationales (subscription billing -> never `claude -p`; file side channel -> avoid lossy TUI scraping), an ASCII architecture diagram of the ask/run_turn poll loop, exact commands, conventions (stdlib-only, single file, tuning constants, multi-place DB-column edits), and forbidden patterns.",
-      "content_hash": "c18877dbe239c718",
-      "lines": "62",
+      "summary": "Agent guidance for clawp. Leads with why (subscription billing → never `claude -p`; transcript capture instead of scraping), an ASCII architecture diagram of the run_print_turn flow (ephemeral tmux launch → verbatim send → transcript tail → dual-signal completion → sqlite log), exact commands, the CLI surface, forbidden patterns (no `claude -p`, no prompt injection, no typing into dialogs except trust Enter), the localized-transcript-parser coupling rule, conventions, and the project-graph section.",
+      "content_hash": "db5afae69ec899ba",
+      "lines": "75",
       "children": []
     },
     "file:LICENSE": {
@@ -51,24 +51,42 @@
       "level": "file",
       "path": ".gitignore",
       "name": ".gitignore",
-      "summary": "Ignores the generated SQLite DB (cw.sqlite), the per-turn scratch dir (.cw/), and Python bytecode (__pycache__/, *.pyc).",
-      "content_hash": "077ada8b9e1dc50b",
-      "lines": "4",
+      "summary": "Ignores the generated sqlite DB (clawp.sqlite) and Python bytecode (__pycache__/, *.pyc).",
+      "content_hash": "e92a1fb9b6fdcb6c",
+      "lines": "3",
       "children": []
+    },
+    "file:docs/clawp-spec.md": {
+      "level": "file",
+      "path": "docs/clawp-spec.md",
+      "name": "clawp-spec.md",
+      "summary": "Authoritative design spec for clawp as a drop-in for `claude -p`. Documents the scope revision (clawp IS the drop-in, all legacy removed), goal/non-goals, the verified transcript-jsonl facts (deterministic path, verbatim answer, stop_reason completion taxonomy, incremental flush, resume/compaction append-only, blocked indistinguishability), CLI surface, session lifecycle (ephemeral), output modes, capture algorithm, exit codes, format-coupling posture, and resolved questions. Backed by live Claude Code v2.1.159 runs.",
+      "content_hash": "24fc19dbc3a17104",
+      "lines": "198",
+      "children": []
+    },
+    "dir:docs": {
+      "level": "directory",
+      "path": "docs",
+      "name": "docs",
+      "summary": "Design documentation. Holds `clawp-spec.md`, the authoritative, verification-backed spec for clawp's drop-in-for-`claude -p` design.",
+      "content_hash": "fd5a710411b05680",
+      "children": ["file:docs/clawp-spec.md"]
     },
     "dir:.": {
       "level": "directory",
       "path": ".",
       "name": "claude-wrapper",
-      "summary": "`cw`: a single-file Python tool that scripts the interactive `claude` TUI via tmux so usage bills against the Claude subscription instead of the Agent SDK credit pool. `cw.py` holds all logic (tmux orchestration, file side-channel capture, SQLite storage); `test_cw.py` covers the pure screen-parsing helpers. `README.md` is end-user docs and `CLAUDE.md` is agent guidance. No build system or third-party dependencies — standard library only.",
-      "content_hash": "03eb8bbfd5e211e0",
+      "summary": "`clawp`: a single-file Python tool that makes scripted `claude` usage bill against the Claude subscription instead of the Agent SDK credit pool, by driving the interactive TUI via tmux and capturing replies from Claude Code's transcript jsonl. A subscription-billed drop-in for `claude -p`. `clawp.py` holds all logic (tmux orchestration, transcript parsing, sqlite logging); `test_clawp.py` covers the pure helpers; `docs/clawp-spec.md` is the design spec; `README.md` is end-user docs; `CLAUDE.md` is agent guidance. Stdlib only, no build system.",
+      "content_hash": "a811e71e8a019f38",
       "children": [
-        "file:cw.py",
-        "file:test_cw.py",
+        "file:clawp.py",
+        "file:test_clawp.py",
         "file:README.md",
         "file:CLAUDE.md",
         "file:LICENSE",
-        "file:.gitignore"
+        "file:.gitignore",
+        "dir:docs"
       ]
     }
   }

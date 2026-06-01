@@ -1,8 +1,10 @@
-# cw
+# clawp
 
-Drive the interactive `claude` CLI through tmux and capture its replies into SQLite — so scripted use bills against your **Claude subscription** instead of the Agent SDK credit pool that `claude -p` draws from (as of 2026-06-15).
+A subscription-billed drop-in for `claude -p`. `clawp [flags] [prompt]` (or `echo prompt | clawp`) behaves like `claude -p` — prompt in, answer to stdout, status + session-id to stderr — but runs the normal interactive `claude` TUI inside a tmux pane so usage bills against your **Claude subscription** instead of the Agent SDK credit pool that `claude -p` draws from.
 
-`cw` never calls `claude -p`. It runs the normal interactive TUI inside a tmux session, sends prompts, and has claude write its raw answer to a scratch file that `cw` ingests into SQLite at full fidelity.
+The name: **claw** (claude wrapper) + **p** (the `claude -p` it stands in for).
+
+`clawp` never calls `claude -p`. It launches the interactive TUI with a known session-id, sends your prompt verbatim, and reads the answer back from the transcript jsonl that Claude Code writes to disk — full fidelity, markdown and code fences intact, no scratch file.
 
 ## Requirements
 
@@ -15,58 +17,68 @@ Drive the interactive `claude` CLI through tmux and capture its replies into SQL
 It's a single file:
 
 ```sh
-chmod +x cw.py && ln -s "$PWD/cw.py" /usr/local/bin/cw
+chmod +x clawp.py && ln -s "$PWD/clawp.py" /usr/local/bin/clawp
 ```
 
-…or just run `python3 cw.py …`.
+…or just run `python3 clawp.py …`.
 
 ## Usage
 
 ```sh
-cw ask "summarize the difference between TCP and UDP"
-cw ask "explain this stack trace: …" -s debugging        # named session, own context
-cw ask "add type hints to calc.py" -c ~/proj --full-auto # run tools/edits unattended
-cw history -n 20                                          # recent stored turns
-cw stop -s debugging                                      # end a session
+clawp "summarize the difference between TCP and UDP"
+echo "explain this stack trace: …" | clawp                  # prompt from stdin
+clawp --output-format json "list two primes"                # single JSON result object
+clawp --output-format stream-json "…"                       # live NDJSON event stream
+clawp --resume <session-id> "and now in Python"             # continue a prior session
+clawp --model opus "…"                                       # pass-through session flag
+clawp --full-auto "add type hints to calc.py"               # run tools/edits unattended
+clawp --history -n 20                                        # recent stored turns
 ```
 
-Replies print to stdout, status to stderr, and every turn is stored in `cw.sqlite`.
+The answer prints to stdout; status and the session-id go to stderr (and `session_id` is in the JSON output) so you can `--resume` later. Every turn is logged to `clawp.sqlite`.
 
-### Options (`ask`)
+### Options
 
 | flag | meaning |
 |------|---------|
-| `-s, --session NAME` | Conversation name (default `cw`). Each is a persistent claude session with its own context, reused across calls. |
-| `-c, --cwd DIR` | Directory claude runs in (default: current). Gives claude that project's files. |
-| `-d, --db PATH` | SQLite file (default `./cw.sqlite`). |
-| `--full-auto` | Launch with `bypassPermissions` — claude runs commands/edits without asking. Only use on prompts and projects you trust. |
+| `-p, --print` | accepted no-op (`clawp` is always print) — for `claude -p` compatibility |
+| `--output-format text\|json\|stream-json` | `text` (default), one `result` JSON object, or live NDJSON events |
+| `--resume <id>` | continue a specific session (reloads prior context); `-c`/`--continue` not supported |
+| `--session-id <uuid>` | use this id instead of a generated one |
+| `--full-auto` | launch with `bypassPermissions` (default `acceptEdits`) — only on prompts/projects you trust |
+| `--cwd <dir>` | directory claude runs in (default: current); long-form only |
+| `-d, --db <path>` | sqlite log file (default `./clawp.sqlite`) |
+| `--history`, `-n <N>` | view recent logged turns instead of running |
+| `--model`, `--add-dir`, `--system-prompt`, `--permission-mode`, … | passed through to the interactive launch |
+
+Print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) are rejected rather than silently ignored.
 
 ## How it works
 
-1. Launches `claude --permission-mode acceptEdits` in a detached tmux pane (interactive → subscription billing).
-2. Sends your prompt plus a one-line instruction to `Write` the full raw reply to a per-turn file.
-3. Watches for that file. The on-screen spinner distinguishes "still working" from "idle"; if claude goes idle without writing, `cw` nudges it.
-4. Reads the file (raw markdown, code intact) and stores it in SQLite.
+1. Generate (or resume) a session-id and launch `claude --session-id <uuid> --permission-mode <mode>` in a detached tmux pane (interactive → subscription billing). The one-time trust-folder prompt is cleared with a single Enter.
+2. Record the current length of the transcript (`~/.claude/projects/*/<session-id>.jsonl`), then send your prompt **verbatim** via bracketed paste — no injected instructions.
+3. Tail the transcript from that offset. Completion is **dual-signalled**: a new `assistant` record with a terminal `stop_reason` (the fast path, whose `text` blocks are the answer), or a screen-idle backstop (idle prompt, no spinner, stable) for unknown future stop reasons and dialogs.
+4. Capture the answer, log it to SQLite, and kill the pane on every exit path.
 
-The file side channel exists because scraping the rendered terminal loses markdown and code formatting — the file holds exactly what claude produced.
+If the transcript settles but yields no usable answer (a schema change), `text` mode falls back to a lossy screen scrape flagged `low_fidelity`; `json`/`stream-json` fail loudly rather than emit something wrong.
 
-Stored columns: `id, ts, session, prompt, reply, seconds, via, nudges, low_fidelity, timed_out, blocked, note`. `via=file` is a clean capture; `via=scrape` is the lossy fallback.
+Stored columns: `id, ts, session, prompt, reply, seconds, via, nudges, low_fidelity, timed_out, blocked, note`.
 
 ## Limitations & known behavior
 
-- **Sweet spot is Q&A and light, mostly-edit tasks.** Tool-using turns work, but `cw` rebuilds by hand — against a TUI — what `claude -p --output-format stream-json` gives natively. The more autonomous the work, the more the fragility shows.
-- **Permission mode is fixed at session creation.** To switch a running session to/from `--full-auto`, `cw stop` it first.
-- **First-pass write adherence isn't 100%.** Sometimes claude answers but skips the file; the nudge recovers it (~10s), shown in the `nudges` column.
-- **If a permission prompt appears** (restrictive config, no `--full-auto`), the turn is reported `blocked` rather than answered. Use `--full-auto` for unattended runs.
-- **One turn at a time per session** — concurrent `ask`s on one session fail fast; use different `-s` names for parallelism.
+- **Sweet spot is Q&A and light, mostly-edit tasks.** Tool-using turns work, but `clawp` reconstructs against a TUI what `claude -p --output-format stream-json` gives natively; the more autonomous the work, the more the fragility shows.
+- **Per-call launch latency.** Each call spins up an ephemeral pane and waits for the idle prompt (a warm pool for the resume path is on the roadmap).
+- **If a permission prompt appears** (restrictive config, no `--full-auto`), the turn is reported `blocked` (exit 3) rather than answered. Use `--full-auto` for unattended runs that touch web/bash.
+- **No token-level partials.** The transcript stores whole messages, so `--include-partial-messages` cannot be reproduced.
+- **One turn at a time per pane** — a concurrent run against the same session fails fast; distinct session-ids run in parallel.
 - Developed against macOS, tmux 3.5a, Claude Code v2.1.x.
 
 ## Roadmap
 
+- Warm pane pool for the `--resume` path (cut per-call launch latency)
 - Capture the work product (git diff / files touched), not just the final message
 - Handle context autocompaction and rate-limit waits explicitly
 - Retry/backoff on errors instead of timing out
-- Slash-command support (`/clear`, `/compact`, custom commands)
 
 ## License
 

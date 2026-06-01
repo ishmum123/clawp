@@ -1,4 +1,3 @@
-cw.sqlite
-.cw/
+clawp.sqlite
 __pycache__/
 *.pyc
