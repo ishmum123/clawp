@@ -4,28 +4,36 @@ replies via a side channel, and store them in sqlite.
 
 Why a side channel: scraping the TUI yields *rendered* text (markdown/code is
 mangled). Instead we append an instruction to each prompt telling claude to
-Write its raw verbatim answer to a scratch file; the wrapper reads that file
-(full fidelity) and inserts it into sqlite with a parameterized query.
+Write its raw verbatim answer to a per-turn scratch file; the wrapper reads that
+file (full fidelity) and inserts it into sqlite with a parameterized query.
 
 Billing: runs claude in normal interactive mode (never `-p`), so usage counts
-against your Claude subscription, not the Agent SDK credit pool. `acceptEdits`
-permission mode lets the Write land without a prompt; the end user sets up
-nothing.
+against your Claude subscription, not the Agent SDK credit pool.
 
-Completion: the scratch file is the signal - a unique path per turn, so a cheap
-stat tells us claude finished (full fidelity, no screen parsing). The screen is
-consulted only when the file is missing: the spinner animates while claude
-works, so a stable screen with no spinner means it went idle without writing,
-and we nudge (after a short floor) until the file appears.
+Permissions: launches with `--permission-mode acceptEdits` so file writes land
+without a prompt. For unattended command-heavy work use `--full-auto`
+(`bypassPermissions`) - claude then runs everything without asking, so only
+point it at prompts/projects you trust. If a permission dialog does appear and
+full-auto is off, the turn is reported `blocked` rather than hanging or having
+nudge keystrokes typed into the dialog.
+
+Completion: the scratch file is the signal (cheap stat, unique per turn, full
+fidelity). The screen is consulted only when the file is missing: the spinner
+animates while claude works, so a stable screen at the idle prompt with no
+spinner means it went idle without writing -> nudge (after a floor). A frozen
+screen (no change for STALL_SECS) is treated as a hang.
 
 Usage:
-    python3 cw.py ask "your prompt"           # create/reuse default session
-    python3 cw.py ask "prompt" -s name        # named session
-    python3 cw.py history [-n 10] [-s name]   # recent stored turns
-    python3 cw.py stop [-s name]              # kill the session
+    python3 cw.py ask "your prompt"            # create/reuse default session
+    python3 cw.py ask "prompt" -s name         # named session
+    python3 cw.py ask "prompt" --full-auto     # bypass all permission prompts
+    python3 cw.py history [-n 10] [-s name]    # recent stored turns
+    python3 cw.py stop [-s name]               # kill the session
 """
 import argparse
+import contextlib
 import datetime
+import fcntl
 import os
 import re
 import sqlite3
@@ -37,14 +45,21 @@ import uuid
 POLL = 0.6              # seconds between captures
 STABLE_NEEDED = 3       # consecutive identical captures => screen has gone quiet
 NUDGE_FLOOR = 10        # seconds after sending before any nudge is allowed
+STALL_SECS = 180        # screen unchanged this long (e.g. frozen spinner) => hang
+MAX_TURN = 1800         # absolute per-turn cap (seconds)
 READY_TIMEOUT = 45      # seconds to reach the idle prompt after launch
-ANSWER_TIMEOUT = 300    # seconds to wait for a reply (last-ditch fallback)
 MAX_NUDGES = 2          # times to re-ask if idle without a written file
 PANE_W, PANE_H = 220, 50
 
-PROMPT_RE = re.compile(r"^❯\s")            # input box / echoed prompt
 ASSIST_RE = re.compile(r"^⏺\s?")           # assistant message start (scrape fallback)
+PROMPT_RE = re.compile(r"^❯\s")            # input box / echoed prompt
 DONE_RE = re.compile(r"\bfor\s+\d+s\b")    # completion line: "✻ Baked for 2s"
+
+# Phrases that mean a blocking dialog (permission / trust) owns the screen.
+DIALOG_MARKERS = (
+    "Do you want", "don't ask again", "tell Claude what to do differently",
+    "trust this folder", "Quick safety check", "No, and tell Claude",
+)
 
 INSTRUCTION = (
     "\n\n[wrapper instruction] When you have completely finished answering "
@@ -73,10 +88,6 @@ def capture(name):
     return tmux("capture-pane", "-p", "-S", "-", "-t", name).stdout
 
 
-def is_ready(screen):
-    return "Model:" in screen and "❯" in screen
-
-
 def bottom_lines(screen, n=12):
     lines = screen.splitlines()
     while lines and not lines[-1].strip():
@@ -85,18 +96,28 @@ def bottom_lines(screen, n=12):
 
 
 def has_spinner(screen):
-    # Active work shows a gerund line with an ellipsis ("✳ Flambéing…"); the
-    # idle "done" summary ("✻ Baked for 2s") has none. An ellipsis in the bottom
-    # region therefore means claude is still going.
+    # Active work shows a gerund line with an ellipsis ("✳ Flambéing…") and/or a
+    # "⎿ Running…" tool line; the idle "done" summary ("✻ Baked for 2s") has
+    # none. An ellipsis in the bottom region means claude is still going.
     return any("…" in l for l in bottom_lines(screen))
 
 
-def ensure_session(name, cwd):
+def looks_blocked(screen):
+    return any(m in screen for m in DIALOG_MARKERS)
+
+
+def at_idle_prompt(screen):
+    # The status bar ("Model: ...") is present on a normal interactive screen
+    # and absent when a full-screen dialog owns it.
+    return "Model:" in screen and not looks_blocked(screen)
+
+
+def ensure_session(name, cwd, permission_mode):
     """Create the claude session if absent; clear trust prompt; wait until idle."""
     if has_session(name):
         return
     tmux("new-session", "-d", "-s", name, "-x", str(PANE_W), "-y", str(PANE_H),
-         "-c", cwd, "claude", "--permission-mode", "acceptEdits")
+         "-c", cwd, "claude", "--permission-mode", permission_mode)
     deadline = time.time() + READY_TIMEOUT
     trusted = False
     while time.time() < deadline:
@@ -107,14 +128,21 @@ def ensure_session(name, cwd):
             trusted = True
             time.sleep(1.0)
             continue
-        if is_ready(screen):
+        if at_idle_prompt(screen) and not has_spinner(screen):
             return
         time.sleep(POLL)
     raise TimeoutError(f"claude session '{name}' did not become ready in "
                        f"{READY_TIMEOUT}s")
 
 
+def clear_input(name):
+    # Drop any ghost prompt-suggestion or stray text so the paste lands clean.
+    tmux("send-keys", "-t", name, "Escape")
+    tmux("send-keys", "-t", name, "C-u")
+
+
 def send_text(name, text):
+    clear_input(name)
     tmux("load-buffer", "-", stdin_text=text)
     tmux("paste-buffer", "-p", "-t", name)   # -p = bracketed paste (multiline-safe)
     time.sleep(0.4)
@@ -130,50 +158,56 @@ def read_reply(path):
         return f.read().rstrip("\n")
 
 
-def run_turn(name, file_path, timeout):
-    """Wait for the turn to settle.
+def _meta(via, nudges, low_fidelity, timed_out, blocked=False, note=""):
+    return {"via": via, "nudges": nudges, "low_fidelity": int(low_fidelity),
+            "timed_out": int(timed_out), "blocked": int(blocked), "note": note}
 
-    The file is the completion signal: a cheap stat, full fidelity, and a unique
-    path per turn (no stale-file risk), so the happy path returns the instant it
-    appears without ever capturing the screen. The screen is consulted only when
-    the file is missing, to decide wait-vs-nudge: nudge only once claude is
-    provably idle (screen stable + no spinner) and past NUDGE_FLOOR seconds.
 
-    Returns (reply_text, meta dict)."""
+def run_turn(name, file_path):
+    """Wait for the turn to settle. Returns (reply_text, meta)."""
     start = time.time()
-    deadline = start + timeout
     last = None
     stable = 0
     nudges = 0
-    while time.time() < deadline:
+    last_change = start
+    while time.time() - start < MAX_TURN:
         if file_ready(file_path):                       # file-first: happy path
-            return read_reply(file_path), {"via": "file", "nudges": nudges,
-                                           "low_fidelity": False, "timed_out": False}
+            return read_reply(file_path), _meta("file", nudges, False, False)
         screen = capture(name)
+        now = time.time()
         if screen == last:
             stable += 1
         else:
             stable = 1
             last = screen
-        idle = stable >= STABLE_NEEDED and not has_spinner(screen)
-        if idle and time.time() - start >= NUDGE_FLOOR:
-            if nudges < MAX_NUDGES:
-                send_text(name, NUDGE.format(path=file_path))
-                nudges += 1
-                stable = 0
-                last = None
-                time.sleep(1.0)
-                continue
-            # gave up waiting for the file: fall back to a (lossy) scrape
-            return scrape_reply(screen), {"via": "scrape", "nudges": nudges,
-                                          "low_fidelity": True, "timed_out": False}
+            last_change = now
+        if now - last_change >= STALL_SECS:             # frozen => hang
+            return scrape_reply(screen), _meta("scrape", nudges, True, True,
+                                               note="stalled")
+        if has_spinner(screen):                         # still working
+            time.sleep(POLL)
+            continue
+        if stable >= STABLE_NEEDED:                     # screen quiet, not working
+            if not at_idle_prompt(screen):              # a dialog/unknown owns it
+                return scrape_reply(screen), _meta("scrape", nudges, True, False,
+                                                   blocked=True, note="not at idle prompt")
+            if now - start >= NUDGE_FLOOR:
+                if nudges < MAX_NUDGES:
+                    send_text(name, NUDGE.format(path=file_path))
+                    nudges += 1
+                    stable = 0
+                    last = None
+                    last_change = time.time()
+                    time.sleep(1.0)
+                    continue
+                return scrape_reply(screen), _meta("scrape", nudges, True, False,
+                                                   note="no file after nudges")
         time.sleep(POLL)
-    # timeout fallback
+    # absolute cap hit
     if file_ready(file_path):
-        return read_reply(file_path), {"via": "file", "nudges": nudges,
-                                       "low_fidelity": False, "timed_out": True}
-    return (scrape_reply(last) if last else ""), {"via": "scrape", "nudges": nudges,
-                                                  "low_fidelity": True, "timed_out": True}
+        return read_reply(file_path), _meta("file", nudges, False, True)
+    return (scrape_reply(last) if last else ""), _meta("scrape", nudges, True, True,
+                                                       note="max turn")
 
 
 def scrape_reply(screen):
@@ -194,46 +228,66 @@ def scrape_reply(screen):
     return "\n".join(out).strip()
 
 
+@contextlib.contextmanager
+def session_lock(name):
+    """Serialize turns per session; a second concurrent run fails fast."""
+    path = os.path.join("/tmp", f"cw-{name}.lock")
+    f = open(path, "w")
+    try:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit(f"[cw] session '{name}' is busy (another cw is "
+                             "running against it)")
+        yield
+    finally:
+        fcntl.flock(f, fcntl.LOCK_UN)
+        f.close()
+
+
 def init_db(db_path):
     con = sqlite3.connect(db_path)
     con.execute("""CREATE TABLE IF NOT EXISTS responses(
         id TEXT PRIMARY KEY, ts TEXT, session TEXT, prompt TEXT, reply TEXT,
         seconds REAL, via TEXT, nudges INTEGER, low_fidelity INTEGER,
-        timed_out INTEGER)""")
+        timed_out INTEGER, blocked INTEGER, note TEXT)""")
+    for col in ("blocked INTEGER", "note TEXT"):           # migrate older DBs
+        with contextlib.suppress(sqlite3.OperationalError):
+            con.execute(f"ALTER TABLE responses ADD COLUMN {col}")
     con.commit()
     return con
 
 
-def ask(prompt, session, cwd, db_path, timeout, debug=False):
-    ensure_session(session, cwd)
-    turn_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
-    scratch_dir = os.path.join(cwd, ".cw")
-    os.makedirs(scratch_dir, exist_ok=True)
-    file_path = os.path.join(scratch_dir, turn_id + ".md")
+def ask(prompt, session, cwd, db_path, full_auto, debug=False):
+    mode = "bypassPermissions" if full_auto else "acceptEdits"
+    with session_lock(session):
+        ensure_session(session, cwd, mode)
+        turn_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
+        scratch_dir = os.path.join(cwd, ".cw")
+        os.makedirs(scratch_dir, exist_ok=True)
+        file_path = os.path.join(scratch_dir, turn_id + ".md")
 
-    t0 = time.time()
-    send_text(session, prompt + INSTRUCTION.format(path=file_path))
-    time.sleep(0.8)
-    reply, meta = run_turn(session, file_path, timeout)
-    seconds = round(time.time() - t0, 1)
+        t0 = time.time()
+        send_text(session, prompt + INSTRUCTION.format(path=file_path))
+        time.sleep(0.8)
+        reply, meta = run_turn(session, file_path)
+        seconds = round(time.time() - t0, 1)
 
     con = init_db(db_path)
-    con.execute("INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?)", (
+    con.execute("INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
         turn_id, datetime.datetime.now(datetime.timezone.utc).isoformat(),
         session, prompt, reply, seconds, meta["via"], meta["nudges"],
-        int(meta["low_fidelity"]), int(meta["timed_out"])))
+        meta["low_fidelity"], meta["timed_out"], meta["blocked"], meta["note"]))
     con.commit()
     con.close()
 
-    note = []
+    flags = [k for k in ("low_fidelity", "timed_out", "blocked") if meta[k]]
     if meta["nudges"]:
-        note.append(f"{meta['nudges']} nudge(s)")
-    if meta["low_fidelity"]:
-        note.append("LOW-FIDELITY scrape fallback")
-    if meta["timed_out"]:
-        note.append("TIMED OUT")
+        flags.append(f"{meta['nudges']} nudge(s)")
+    if meta["note"]:
+        flags.append(meta["note"])
     sys.stderr.write(f"[cw] {session} {seconds}s via={meta['via']}"
-                     + (f" ({', '.join(note)})" if note else "")
+                     + (f" [{', '.join(flags)}]" if flags else "")
                      + f" id={turn_id}\n")
     if debug:
         sys.stderr.write(f"[cw] scratch={file_path}\n")
@@ -266,7 +320,8 @@ def main():
     a.add_argument("-s", "--session", default="cw")
     a.add_argument("-c", "--cwd", default=os.getcwd())
     a.add_argument("-d", "--db", default=os.path.join(os.getcwd(), "cw.sqlite"))
-    a.add_argument("-t", "--timeout", type=int, default=ANSWER_TIMEOUT)
+    a.add_argument("--full-auto", action="store_true",
+                   help="bypass all permission prompts (claude runs anything)")
     a.add_argument("--debug", action="store_true")
 
     h = sub.add_parser("history", help="show recent stored turns")
@@ -279,8 +334,8 @@ def main():
 
     args = ap.parse_args()
     if args.cmd == "ask":
-        print(ask(args.prompt, args.session, args.cwd, args.db, args.timeout,
-                  args.debug))
+        print(ask(args.prompt, args.session, args.cwd, args.db,
+                  args.full_auto, args.debug))
     elif args.cmd == "history":
         history(args.db, args.n, args.session)
     elif args.cmd == "stop":
