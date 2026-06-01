@@ -62,14 +62,6 @@ No build, lint, or package config. `test_clawp.py` is a plain script of `assert`
 - **Never inject** anything into the prompt — it goes out byte-verbatim; the answer comes from the transcript.
 - Never type into a permission/trust dialog to dismiss it (except the one-time trust-folder Enter in `ensure_session`); report the turn `blocked` instead.
 
-## Project graph
-
-`.graph/index.json` is a committed hierarchical summary of the repo, maintained by the `project-graph` skill. Use it to orient before reading source.
-
-- **Before pushing**, run `/project-graph update` so the graph reflects modified/added/deleted files, and commit the refreshed `.graph/index.json` alongside the change.
-- If the skill is missing, install it: `npx skills add ishmum123/project-graph` (the [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI; installs into `.claude/skills/`).
-- Rebuild from scratch with `/project-graph build` if the graph is stale or corrupt.
-
 ## Auto-generated / ignored
 
 `clawp.sqlite`, `__pycache__/`, `*.pyc` — all gitignored.
