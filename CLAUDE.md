@@ -17,7 +17,7 @@ clawp "prompt"
   ├─ ensure_session ── tmux new-session "claude --session-id <uuid> --permission-mode <mode>"
   │                    clears trust prompt (one Enter), waits for idle prompt
   ├─ offset = len(read_records(transcript))   # before send; swallows prior turn's tail
-  ├─ send_text ── prompt VERBATIM via bracketed paste (no injection)
+  ├─ send_text ── prompt VERBATIM via bracketed paste
   ├─ capture loop (POLL=0.6s) — DUAL SIGNAL completion:
   │     transcript: assistant record w/ terminal stop_reason ─> capture text[] (the answer)
   │     screen backstop: idle prompt + no spinner + stable    ─> done (unknown future stop_reason)
@@ -44,7 +44,7 @@ No build, lint, or package config. `test_clawp.py` is a plain script of `assert`
 
 ## CLI surface
 
-`clawp [flags] [prompt]`, mirroring `claude [options] [prompt]`. No subcommands. Prompt from positional arg else stdin; both empty → exit 2. Only `--history` is clawp's own (log viewer). `-p`/`--print` is an accepted no-op synonym. Print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) error rather than silently no-op; session flags (`--model`, `--add-dir`, etc.) pass through to the launch.
+`clawp [flags] [prompt]`, mirroring `claude [options] [prompt]`. No subcommands. Prompt from positional arg else stdin; both empty → exit 2. Only `--history` is clawp's own (log viewer). `-p`/`--print` is an accepted no-op synonym. Print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) exit 2; session flags (`--model`, `--add-dir`, etc.) pass through to the launch.
 
 ## Conventions
 
@@ -52,14 +52,14 @@ No build, lint, or package config. `test_clawp.py` is a plain script of `assert`
 - Keep it a single file; new logic goes in `clawp.py`.
 - Tuning constants live at the top of `clawp.py` (`POLL`, `STABLE_NEEDED`, `STALL_SECS`, `MAX_TURN`, `READY_TIMEOUT`, `SEND_SETTLE`, `PANE_W/H`). Adjust there, not inline.
 - All jsonl-schema knowledge stays in the one localized transcript-parser section (between the `--- transcript parser ---` markers, beside `scrape_reply`). A claude format change is a one-place fix; depend on the minimum set of fields and ignore the rest.
-- `init_db` migrates older DBs via `ALTER TABLE ... ADD COLUMN` wrapped in `suppress(OperationalError)`; when adding a `responses` column, extend the migrate loop **and** the `CREATE TABLE` **and** the `INSERT` placeholder count together.
+- When changing the `responses` schema, update the `CREATE TABLE` and the `INSERT` placeholder count together; if existing `clawp.sqlite` files must carry forward, add an `ALTER TABLE ... ADD COLUMN` migration in `init_db`.
 - Always insert into SQLite with parameterized queries.
 - Comments explain *why* (non-obvious TUI/timing/schema behavior), never *what*. Match the existing near-zero density; no docstrings on self-explanatory helpers.
 
 ## Forbidden
 
 - **Never** invoke `claude -p` / `--print` / any non-interactive mode — breaks the subscription-billing premise.
-- **Never inject** anything into the prompt — it goes out byte-verbatim; the answer comes from the transcript, not a scratch file.
+- **Never inject** anything into the prompt — it goes out byte-verbatim; the answer comes from the transcript.
 - Never type into a permission/trust dialog to dismiss it (except the one-time trust-folder Enter in `ensure_session`); report the turn `blocked` instead.
 
 ## Project graph

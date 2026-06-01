@@ -1,21 +1,16 @@
 # Spec: `clawp` — subscription-billed drop-in for `claude -p`
 
-Status: draft. Design + facts verified against live Claude Code runs (v2.1.159, macOS, tmux 3.5a). All four original open questions resolved (see Resolved questions).
-
-## Scope revision (authoritative)
-
-`clawp` **is** the drop-in for `claude -p` — not a `-p` mode added alongside the old interface. **All legacy is removed**: the scratch-file mechanism (`INSTRUCTION`/`NUDGE` injection, the old `.cw/` dir, `file_ready`/`read_reply`, file-first `run_turn`, nudging) and the `ask`/`stop` subcommand framing are deleted. The transcript-based, verbatim-prompt capture is the *only* implementation. Where this document says `clawp -p`, read it as "clawp" — `-p`/`--print` is accepted as a harmless synonym but is not required.
+Status: draft. Design + facts verified against live Claude Code runs (v2.1.159, macOS, tmux 3.5a). Open questions resolved (see Resolved questions).
 
 ## Goal
 
-`clawp [flags] [prompt]` (and `echo prompt | clawp`) behaves like `claude -p`, but runs through the interactive TUI so it bills against the **Claude subscription**, not the Agent SDK credit pool that `claude -p` draws from.
+`clawp [flags] [prompt]` (and `echo prompt | clawp`) behaves like `claude -p`, but runs through the interactive TUI so it bills against the **Claude subscription**, not the Agent SDK credit pool that `claude -p` draws from. `-p`/`--print` is accepted as a synonym (clawp is always print).
 
 ## Non-goals
 
-- **No legacy compatibility in any sense** — no `ask`/`stop` subcommands, no scratch-file injection.
 - `--include-partial-messages` (token-by-token streaming) — unreproducible; see Confirmed #6.
-- Usage/cost reporting — dropped by decision (the data is available but out of scope).
-- 100% flag parity — only the flags below are honored; unsupported ones error rather than silently no-op.
+- Usage/cost reporting — the data is available but out of scope.
+- 100% flag parity — only the flags below are honored; the rest exit 2.
 
 ---
 
@@ -31,7 +26,7 @@ These are measured facts, not assumptions.
    Verified launch was `claude --session-id <uuid> --permission-mode acceptEdits` (no `-p`) → interactive → subscription billing. The flag only names the conversation; it adds zero tokens. Reading/tailing the transcript is a passive local read (zero tokens, zero billing impact).
 
 3. **The final answer is in the transcript, verbatim.**
-   The last `assistant` message's `text` block holds the raw API answer with markdown and code fences intact (e.g. backticks preserved). This is the source of truth — **no scratch-file injection needed**, so the prompt goes out byte-verbatim.
+   The last `assistant` message's `text` block holds the raw API answer with markdown and code fences intact (e.g. backticks preserved). This is the source of truth, so the prompt goes out byte-verbatim.
 
 4. **Completion marker, and the `stop_reason` taxonomy.** On assistant messages:
    - **terminal (turn done):** `end_turn`, `max_tokens`, `stop_sequence`, `refusal`
@@ -74,7 +69,7 @@ clawp --history [-n N]                # view recent logged turns from clawp.sqli
 
 **Prompt source:** positional arg, else stdin (matches `claude -p`). If both empty → error (exit 2). `--history` takes no prompt.
 
-**stdout/stderr contract:** final result to stdout only; status/diagnostics to stderr. The session-id is printed to stderr (and is the `session_id` field in json mode) so callers can resume.
+**stdout/stderr contract:** final result to stdout only. A clean run is **silent on stderr**, matching `claude -p`; stderr carries only degraded/error diagnostics (schema fallback / `low_fidelity`, `blocked`, `timeout`). The session-id is **not** printed to stderr — it is exposed via the `session_id` field in json/stream-json output and via `clawp.sqlite` (`--history`), which is how callers obtain it to `--resume` (same as `claude -p`, where the id comes from json output or a pre-assigned `--session-id`).
 
 ### Flags
 
@@ -103,13 +98,13 @@ clawp --history [-n N]                # view recent logged turns from clawp.sqli
 
 **Warm pool — later optimization, not v1.** A pool of live panes avoids per-call launch latency. It maps cleanly onto the **stateful/resume** path (a pane stays bound to one session-id). It does *not* fit the stateless default cleanly: a live pane carries one session-id for its life, so reusing it for a fresh stateless call needs `/clear` (which starts a new, auto-assigned id → reintroduces discovery). Decision: ship ephemeral first; add a warm pool for the resume path once v1 is proven.
 
-**Concurrency:** unique session-id per call → unique tmux name → clawp's per-session flock no longer serializes independent calls. `clawp -p` fan-out becomes possible, bounded by machine resources.
+**Concurrency:** unique session-id per call → unique tmux name → the per-session flock does not serialize independent calls. `clawp` fan-out runs in parallel, bounded by machine resources.
 
 ---
 
 ## Output modes
 
-All three are built by reading/tailing the transcript jsonl (Confirmed #1, #3, #5, #7). No prompt injection.
+All three are built by reading/tailing the transcript jsonl (Confirmed #1, #3, #5, #7).
 
 - **text** (default): on turn-done, print the final assistant `text` block(s) to stdout, verbatim.
 - **json**: emit one object on completion:

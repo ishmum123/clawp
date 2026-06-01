@@ -13,8 +13,8 @@ so usage bills against your Claude subscription rather than the Agent SDK credit
 pool that `claude -p` draws from.
 
 How: generate (or resume) a session-id, launch `claude --session-id <uuid> ...`
-in an ephemeral pane, send the prompt VERBATIM (no injection), and capture the
-answer from the transcript jsonl claude writes to
+in an ephemeral pane, send the prompt verbatim, and capture the answer from the
+transcript jsonl claude writes to
 `~/.claude/projects/*/<session-id>.jsonl`. Completion is dual-signalled: a new
 assistant record with a terminal stop_reason, or a screen-idle backstop. The
 pane is reaped on every exit path.
@@ -290,26 +290,23 @@ def init_db(db_path):
     con = sqlite3.connect(db_path)
     con.execute("""CREATE TABLE IF NOT EXISTS responses(
         id TEXT PRIMARY KEY, ts TEXT, session TEXT, prompt TEXT, reply TEXT,
-        seconds REAL, via TEXT, nudges INTEGER, low_fidelity INTEGER,
-        timed_out INTEGER, blocked INTEGER, note TEXT)""")
-    for col in ("blocked INTEGER", "note TEXT"):           # migrate older DBs
-        with contextlib.suppress(sqlite3.OperationalError):
-            con.execute(f"ALTER TABLE responses ADD COLUMN {col}")
+        seconds REAL, low_fidelity INTEGER, timed_out INTEGER, blocked INTEGER,
+        note TEXT)""")
     con.commit()
     return con
 
 
-def _meta(via, nudges, low_fidelity, timed_out, blocked=False, note=""):
-    return {"via": via, "nudges": nudges, "low_fidelity": int(low_fidelity),
-            "timed_out": int(timed_out), "blocked": int(blocked), "note": note}
+def _meta(low_fidelity, timed_out, blocked=False, note=""):
+    return {"low_fidelity": int(low_fidelity), "timed_out": int(timed_out),
+            "blocked": int(blocked), "note": note}
 
 
 def _log_turn(db_path, turn_id, session_id, prompt, reply, seconds, meta):
     con = init_db(db_path)
-    con.execute("INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (
+    con.execute("INSERT INTO responses VALUES (?,?,?,?,?,?,?,?,?,?)", (
         turn_id, datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        session_id, prompt, reply, seconds, meta["via"], meta["nudges"],
-        meta["low_fidelity"], meta["timed_out"], meta["blocked"], meta["note"]))
+        session_id, prompt, reply, seconds, meta["low_fidelity"],
+        meta["timed_out"], meta["blocked"], meta["note"]))
     con.commit()
     con.close()
 
@@ -348,14 +345,14 @@ def run_print_turn(args, cwd, db_path):
     turn_id = (datetime.datetime.now().strftime("%Y%m%d-%H%M%S-")
                + uuid.uuid4().hex[:4])
     answer = None
-    meta = _meta("print", 0, False, False)
+    meta = _meta(False, False)
     seconds = 0.0
     with session_lock(name):
         try:
             try:
                 ensure_session(name, cwd, claude_args)
             except TimeoutError as e:
-                meta = _meta("print", 0, False, True, note="launch failed")
+                meta = _meta(False, True, note="launch failed")
                 raise CwError(5, str(e))
 
             path = find_transcript(session_id)
@@ -406,12 +403,11 @@ def run_print_turn(args, cwd, db_path):
                     last_screen = screen
                     last_change = now
                 if looks_blocked(screen):
-                    meta = _meta("print", 0, False, False, blocked=True,
-                                 note="blocked")
+                    meta = _meta(False, False, blocked=True, note="blocked")
                     raise CwError(3, "blocked: permission/trust dialog "
                                   "(use --full-auto for unattended runs)")
                 if now - last_change >= STALL_SECS:
-                    meta = _meta("print", 0, False, True, note="stalled")
+                    meta = _meta(False, True, note="stalled")
                     raise CwError(4, "stall: screen frozen, no terminal "
                                   "stop_reason")
                 if has_spinner(screen):
@@ -422,7 +418,7 @@ def run_print_turn(args, cwd, db_path):
                     break
                 time.sleep(POLL)
             else:
-                meta = _meta("print", 0, False, True, note="max turn")
+                meta = _meta(False, True, note="max turn")
                 raise CwError(4, "timeout: turn exceeded MAX_TURN")
 
             # Schema-break fallback: settled but parsed no usable answer. Slice
@@ -435,8 +431,7 @@ def run_print_turn(args, cwd, db_path):
                 vsfx = f" on Claude Code v{ver}" if ver else ""
                 if fmt == "text":
                     answer = scrape_reply(capture(name))
-                    meta = _meta("print", 0, True, False,
-                                 note="schema unrecognized" + vsfx)
+                    meta = _meta(True, False, note="schema unrecognized" + vsfx)
                 else:
                     raise CwError(5, "transcript schema unrecognized" + vsfx
                                   + " (zero usable answer; json/stream-json "
@@ -468,13 +463,13 @@ def show_history(db_path, n):
         sys.stderr.write("[clawp] no database yet\n")
         return 0
     con = sqlite3.connect(db_path)
-    q = ("SELECT ts, session, seconds, via, low_fidelity, timed_out, blocked, "
+    q = ("SELECT ts, session, seconds, low_fidelity, timed_out, blocked, "
          "substr(prompt,1,70) FROM responses ORDER BY ts DESC LIMIT ?")
-    for ts, sess, secs, via, low, to, blk, p in con.execute(q, (n,)):
+    for ts, sess, secs, low, to, blk, p in con.execute(q, (n,)):
         flags = [f for f, v in (("low_fidelity", low), ("timed_out", to),
                                 ("blocked", blk)) if v]
         sfx = f"  [{', '.join(flags)}]" if flags else ""
-        print(f"{ts}  {sess}  {secs}s  {via:6}{sfx}  {p!r}")
+        print(f"{ts}  {sess}  {secs}s{sfx}  {p!r}")
     con.close()
     return 0
 
@@ -500,7 +495,7 @@ def main():
     ap.add_argument("-n", type=int, default=10, help="rows for --history")
     for flag in PASSTHROUGH_FLAGS:
         ap.add_argument(flag)
-    # Reject print-only flags loudly rather than silently no-op them (#8).
+    # These claude flags only function under `claude -p`; clawp exits 2 on them.
     for flag in PRINT_ONLY_FLAGS:
         ap.add_argument(flag, dest="_unsupported_" + flag.lstrip("-"),
                         nargs="?", const=True, default=None)

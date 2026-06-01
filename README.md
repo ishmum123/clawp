@@ -6,7 +6,7 @@ A subscription-billed drop-in for `claude -p`. `clawp [flags] [prompt]` (or `ech
 
 The name: **claw** (claude wrapper) + **p** (the `claude -p` it stands in for).
 
-`clawp` never calls `claude -p`. It launches the interactive TUI with a known session-id, sends your prompt verbatim, and reads the answer back from the transcript jsonl that Claude Code writes to disk — full fidelity, markdown and code fences intact, no scratch file.
+`clawp` never calls `claude -p`. It launches the interactive TUI with a known session-id, sends your prompt verbatim, and reads the answer back from the transcript jsonl that Claude Code writes to disk — full fidelity, markdown and code fences intact.
 
 ## Requirements
 
@@ -55,18 +55,18 @@ The answer prints to stdout; status and the session-id go to stderr (and `sessio
 | `--history`, `-n <N>` | view recent logged turns instead of running |
 | `--model`, `--add-dir`, `--system-prompt`, `--permission-mode`, … | passed through to the interactive launch |
 
-Print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) are rejected rather than silently ignored.
+Print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) are rejected with exit 2.
 
 ## How it works
 
 1. Generate (or resume) a session-id and launch `claude --session-id <uuid> --permission-mode <mode>` in a detached tmux pane (interactive → subscription billing). The one-time trust-folder prompt is cleared with a single Enter.
-2. Record the current length of the transcript (`~/.claude/projects/*/<session-id>.jsonl`), then send your prompt **verbatim** via bracketed paste — no injected instructions.
+2. Record the current length of the transcript (`~/.claude/projects/*/<session-id>.jsonl`), then send your prompt **verbatim** via bracketed paste.
 3. Tail the transcript from that offset. Completion is **dual-signalled**: a new `assistant` record with a terminal `stop_reason` (the fast path, whose `text` blocks are the answer), or a screen-idle backstop (idle prompt, no spinner, stable) for unknown future stop reasons and dialogs.
 4. Capture the answer, log it to SQLite, and kill the pane on every exit path.
 
 If the transcript settles but yields no usable answer (a schema change), `text` mode falls back to a lossy screen scrape flagged `low_fidelity`; `json`/`stream-json` fail loudly rather than emit something wrong.
 
-Stored columns: `id, ts, session, prompt, reply, seconds, via, nudges, low_fidelity, timed_out, blocked, note`.
+Stored columns: `id, ts, session, prompt, reply, seconds, low_fidelity, timed_out, blocked, note`.
 
 ## Limitations & known behavior
 
