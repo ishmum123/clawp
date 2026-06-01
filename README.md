@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A subscription-billed drop-in for `claude -p`. `clawp [flags] [prompt]` (or `echo prompt | clawp`) behaves like `claude -p` — prompt in, answer to stdout, status + session-id to stderr — but runs the normal interactive `claude` TUI inside a tmux pane so usage bills against your **Claude subscription** instead of the Agent SDK credit pool that `claude -p` draws from.
+A subscription-billed drop-in for `claude -p`. `clawp [flags] [prompt]` (or `echo prompt | clawp`) behaves like `claude -p` — prompt in, answer to stdout, silent on a clean run — but runs the normal interactive `claude` TUI inside a tmux pane so usage bills against your **Claude subscription** instead of the Agent SDK credit pool that `claude -p` draws from.
 
 The name: **claw** (claude wrapper) + **p** (the `claude -p` it stands in for).
 
@@ -39,7 +39,24 @@ clawp --full-auto "add type hints to calc.py"               # run tools/edits un
 clawp --history -n 20                                        # recent stored turns
 ```
 
-The answer prints to stdout; status and the session-id go to stderr (and `session_id` is in the JSON output) so you can `--resume` later. Every turn is logged to `clawp.sqlite`.
+The answer prints to stdout; a clean run is silent on stderr (only errors and degraded turns are reported there). The session-id is in the JSON output and in `clawp.sqlite`, so you can `--resume` later. Every turn is logged.
+
+### Example
+
+```console
+$ clawp "in one sentence, what does Rust's ? operator do?"
+It propagates errors by unwrapping an Ok/Some value or returning the Err/None early from the enclosing function.
+
+$ answer=$(clawp "capital of Japan, one word")    # capture in a script
+$ echo "$answer"
+Tokyo
+
+$ clawp --output-format json "list two primes as a JSON array"
+{"type": "result", "subtype": "success", "session_id": "9dc74688-c41a-4b66-bddf-fddfb56b7da6", "result": "[2, 3]", "is_error": false, "duration_ms": 5900}
+
+$ clawp --resume 9dc74688-c41a-4b66-bddf-fddfb56b7da6 "and two more"
+[5, 7]
+```
 
 ### Options
 
