@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-06-01T00:00:00Z",
+  "entries": {
+    "file:cw.py": {
+      "level": "file",
+      "path": "cw.py",
+      "name": "cw.py",
+      "summary": "Single-file CLI that drives the interactive `claude` TUI through tmux and stores full-fidelity replies in SQLite. Entry point `main()` dispatches `ask`/`history`/`stop` subcommands; `ask()` acquires a per-session flock, calls `ensure_session()` to launch `claude --permission-mode <mode>` in a detached tmux pane, `send_text()` to bracketed-paste the prompt plus an INSTRUCTION to Write a verbatim answer to a `.cw/<turn-id>.md` scratch file, and `run_turn()` to poll for that file (falling back to lossy `scrape_reply()` on hang/dialog/timeout). Screen-state helpers `has_spinner`, `looks_blocked`, `at_idle_prompt` parse tmux captures; `init_db()` creates/migrates the `responses` table. Standard library only; never uses `claude -p`.",
+      "content_hash": "d9f6d97c84be1aa6",
+      "lines": "347",
+      "children": []
+    },
+    "file:test_cw.py": {
+      "level": "file",
+      "path": "test_cw.py",
+      "name": "test_cw.py",
+      "summary": "Plain assert-based test script (no test framework) exercising cw's pure screen-parsing helpers against fixture captures (DONE, WORKING, TRUST, PERMISSION). Validates `has_spinner`, `looks_blocked`, `at_idle_prompt`, and `scrape_reply`. Run directly with `python3 test_cw.py`; no live claude needed.",
+      "content_hash": "008d6cdb70ebf4e2",
+      "lines": "57",
+      "children": []
+    },
+    "file:README.md": {
+      "level": "file",
+      "path": "README.md",
+      "name": "README.md",
+      "summary": "End-user documentation: rationale (subscription vs Agent SDK credit billing), requirements (claude, tmux, python3), install as a single file, usage of ask/history/stop, the ask flags table, a how-it-works walkthrough, limitations, and roadmap. MIT licensed.",
+      "content_hash": "14e2a491614d4c7b",
+      "lines": "73",
+      "children": []
+    },
+    "file:CLAUDE.md": {
+      "level": "file",
+      "path": "CLAUDE.md",
+      "name": "CLAUDE.md",
+      "summary": "Guidance for Claude Code working in this repo. Documents the two design rationales (subscription billing -> never `claude -p`; file side channel -> avoid lossy TUI scraping), an ASCII architecture diagram of the ask/run_turn poll loop, exact commands, conventions (stdlib-only, single file, tuning constants, multi-place DB-column edits), and forbidden patterns.",
+      "content_hash": "c18877dbe239c718",
+      "lines": "62",
+      "children": []
+    },
+    "file:LICENSE": {
+      "level": "file",
+      "path": "LICENSE",
+      "name": "LICENSE",
+      "summary": "MIT License.",
+      "content_hash": "8185bf3a746e2bf9",
+      "lines": "21",
+      "children": []
+    },
+    "file:.gitignore": {
+      "level": "file",
+      "path": ".gitignore",
+      "name": ".gitignore",
+      "summary": "Ignores the generated SQLite DB (cw.sqlite), the per-turn scratch dir (.cw/), and Python bytecode (__pycache__/, *.pyc).",
+      "content_hash": "077ada8b9e1dc50b",
+      "lines": "4",
+      "children": []
+    },
+    "dir:.": {
+      "level": "directory",
+      "path": ".",
+      "name": "claude-wrapper",
+      "summary": "`cw`: a single-file Python tool that scripts the interactive `claude` TUI via tmux so usage bills against the Claude subscription instead of the Agent SDK credit pool. `cw.py` holds all logic (tmux orchestration, file side-channel capture, SQLite storage); `test_cw.py` covers the pure screen-parsing helpers. `README.md` is end-user docs and `CLAUDE.md` is agent guidance. No build system or third-party dependencies — standard library only.",
+      "content_hash": "03eb8bbfd5e211e0",
+      "children": [
+        "file:cw.py",
+        "file:test_cw.py",
+        "file:README.md",
+        "file:CLAUDE.md",
+        "file:LICENSE",
+        "file:.gitignore"
+      ]
+    }
+  }
+}
