@@ -5,8 +5,10 @@ Name: claw (claude wrapper) + p (the `claude -p` it drops in for).
 
 `clawp [flags] [prompt]` (or `echo prompt | clawp`) behaves like `claude -p`:
 the prompt comes from a positional arg or stdin, the answer goes to stdout, and
-status/diagnostics + the session-id go to stderr with proper exit codes. But it
-runs the *interactive* `claude` TUI in a detached tmux pane (NEVER `claude -p`),
+a clean run is silent on stderr (only errors/degraded turns are reported), with
+proper exit codes. The session-id is exposed via json/stream-json output and
+clawp.sqlite, not stderr. It runs the *interactive* `claude` TUI in a detached
+tmux pane (NEVER `claude -p`),
 so usage bills against your Claude subscription rather than the Agent SDK credit
 pool that `claude -p` draws from.
 
@@ -445,8 +447,12 @@ def run_print_turn(args, cwd, db_path):
                       seconds, meta)
             tmux("kill-session", "-t", name)
 
-    sys.stderr.write(f"[clawp] session={session_id}"
-                     + (f" [{meta['note']}]" if meta["note"] else "") + "\n")
+    # Clean text runs stay silent on stderr, matching `claude -p`; the session-id
+    # lives in the json/stream-json output and clawp.sqlite. Only surface stderr
+    # when the turn was degraded (schema fallback / low fidelity).
+    if meta["low_fidelity"] or meta["note"]:
+        sys.stderr.write(f"[clawp] {meta['note'] or 'low_fidelity'} "
+                         f"(session={session_id})\n")
     if fmt == "text":
         print(answer)
     else:

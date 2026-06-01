@@ -1,5 +1,7 @@
 # clawp
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A subscription-billed drop-in for `claude -p`. `clawp [flags] [prompt]` (or `echo prompt | clawp`) behaves like `claude -p` — prompt in, answer to stdout, status + session-id to stderr — but runs the normal interactive `claude` TUI inside a tmux pane so usage bills against your **Claude subscription** instead of the Agent SDK credit pool that `claude -p` draws from.
 
 The name: **claw** (claude wrapper) + **p** (the `claude -p` it stands in for).
@@ -14,13 +16,15 @@ The name: **claw** (claude wrapper) + **p** (the `claude -p` it stands in for).
 
 ## Install
 
-It's a single file:
+It's a single file — clone and symlink it onto your `PATH`:
 
 ```sh
+git clone https://github.com/ishmum123/clawp.git
+cd clawp
 chmod +x clawp.py && ln -s "$PWD/clawp.py" /usr/local/bin/clawp
 ```
 
-…or just run `python3 clawp.py …`.
+The symlink points at the cloned file, so `git pull` updates your install. To uninstall: `rm /usr/local/bin/clawp`. You can also skip the symlink and run `python3 clawp.py …` directly.
 
 ## Usage
 
