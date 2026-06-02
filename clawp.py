@@ -47,7 +47,8 @@ import time
 import uuid
 
 POLL = 0.6              # seconds between captures
-STABLE_NEEDED = 3       # consecutive identical captures => screen has gone quiet
+STABLE_NEEDED = 5       # identical captures => quiet; *POLL must outlast a
+                        # natural mid-turn streaming pause (~2.4s measured)
 STALL_SECS = 180        # screen unchanged this long (e.g. frozen spinner) => hang
 MAX_TURN = 1800         # absolute per-turn cap (seconds)
 READY_TIMEOUT = 45      # seconds to reach the idle prompt after launch

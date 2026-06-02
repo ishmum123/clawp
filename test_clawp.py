@@ -231,5 +231,11 @@ check("no-op flags parse without error", _args.prompt == "hi")
 check("no-op flags are not forwarded to the launch",
       clawp._passthrough_args(_args) == ["--model", "opus"])
 
+# The idle backstop only decides a turn when no terminal transcript record
+# arrives; its stable window (STABLE_NEEDED * POLL) must outlast a natural
+# mid-turn streaming pause (~2.4s measured on 2.1.159) or it truncates early.
+check("idle-backstop window outlasts the observed ~2.4s mid-turn pause",
+      clawp.STABLE_NEEDED * clawp.POLL > 2.4)
+
 
 print("\nall passed")
