@@ -238,4 +238,30 @@ check("idle-backstop window outlasts the observed ~2.4s mid-turn pause",
       clawp.STABLE_NEEDED * clawp.POLL > 2.4)
 
 
+# send_text must isolate the paste buffer per pane. Every clawp process shares
+# one tmux server, whose unnamed buffer is a single most-recent slot; concurrent
+# turns loading/pasting the unnamed buffer cross prompts. So both load and paste
+# must name the buffer after the pane (-b <name>) — the key everything else is
+# targeted by. (Pure argv check; the live N-way race is in test_concurrency_live.py.)
+def _record_send_text(name, text):
+    calls, real_tmux, real_sleep = [], clawp.tmux, clawp.time.sleep
+    clawp.tmux = lambda *a, **k: calls.append(a)
+    clawp.time.sleep = lambda *a, **k: None
+    try:
+        clawp.send_text(name, text)
+    finally:
+        clawp.tmux, clawp.time.sleep = real_tmux, real_sleep
+    return calls
+
+_st = _record_send_text("clawp-1a2b3c4d", "hello")
+def _argv(verb):
+    return next(a for a in _st if a[:1] == (verb,))
+def _flag(argv, flag):
+    return argv[argv.index(flag) + 1] if flag in argv else None
+check("send_text loads a pane-named buffer, not the shared unnamed one",
+      _flag(_argv("load-buffer"), "-b") == "clawp-1a2b3c4d")
+check("send_text pastes that same pane-named buffer",
+      _flag(_argv("paste-buffer"), "-b") == "clawp-1a2b3c4d")
+
+
 print("\nall passed")

@@ -185,8 +185,12 @@ def clear_input(name):
 
 def send_text(name, text):
     clear_input(name)
-    tmux("load-buffer", "-", stdin_text=text)
-    tmux("paste-buffer", "-p", "-t", name)   # -p = bracketed paste (multiline-safe)
+    # Name the buffer after the pane. The default tmux server (shared by every
+    # clawp process) keeps one unnamed "most-recent" buffer, so concurrent turns
+    # that load/paste it cross prompts; a per-pane named buffer can't collide.
+    # -d drops it after paste so named buffers don't accumulate across sessions.
+    tmux("load-buffer", "-b", name, "-", stdin_text=text)
+    tmux("paste-buffer", "-d", "-p", "-b", name, "-t", name)   # -p = bracketed paste
     time.sleep(0.4)
     tmux("send-keys", "-t", name, "Enter")
 
