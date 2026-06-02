@@ -69,7 +69,7 @@ DIALOG_MARKERS = (
 PRINT_ONLY_FLAGS = ("--input-format", "--max-turns", "--include-partial-messages",
                     "--fallback-model", "--json-schema", "--replay-user-messages")
 # Session flags forwarded verbatim to the interactive launch.
-PASSTHROUGH_FLAGS = ("--model", "--add-dir", "--system-prompt",
+PASSTHROUGH_FLAGS = ("--model", "--effort", "--add-dir", "--system-prompt",
                      "--append-system-prompt", "--allowedTools",
                      "--disallowedTools", "--permission-mode", "--mcp-config",
                      "--agents", "--settings")

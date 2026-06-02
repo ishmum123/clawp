@@ -83,7 +83,7 @@ clawp --history [-n N]                # view recent logged turns from clawp.sqli
 | `--cwd <dir>` | directory claude runs in (default: cwd); long-form only, no `-c` short alias |
 | `--db <path>` | sqlite path (default `./clawp.sqlite`) |
 | `--history`, `-n <N>` | view recent logged turns instead of running a prompt |
-| `--model`, `--add-dir`, `--system-prompt`, `--append-system-prompt`, `--allowedTools`, `--disallowedTools`, `--permission-mode`, `--mcp-config`, `--agents`, `--settings` | **pass through** to the interactive launch |
+| `--model`, `--effort`, `--add-dir`, `--system-prompt`, `--append-system-prompt`, `--allowedTools`, `--disallowedTools`, `--permission-mode`, `--mcp-config`, `--agents`, `--settings` | **pass through** to the interactive launch |
 | `--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages` | **error (exit 2)**: print-only feature unsupported by clawp |
 | unknown flag | error, do not ignore |
 

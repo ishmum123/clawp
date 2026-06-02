@@ -70,7 +70,7 @@ $ clawp --resume 9dc74688-c41a-4b66-bddf-fddfb56b7da6 "and two more"
 | `--cwd <dir>` | directory claude runs in (default: current); long-form only |
 | `-d, --db <path>` | sqlite log file (default `./clawp.sqlite`) |
 | `--history`, `-n <N>` | view recent logged turns instead of running |
-| `--model`, `--add-dir`, `--system-prompt`, `--permission-mode`, … | passed through to the interactive launch |
+| `--model`, `--effort`, `--add-dir`, `--system-prompt`, `--permission-mode`, … | passed through to the interactive launch |
 
 Print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) are rejected with exit 2.
 
