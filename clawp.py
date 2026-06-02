@@ -240,15 +240,30 @@ def final_answer(records):
     return ""
 
 
+def tool_uses(rec):
+    # The tool name lives on the assistant's tool_use block; the matching
+    # tool_result (a later user record) carries only tool_use_id.
+    blocks = (rec.get("message") or {}).get("content") or []
+    return [b for b in blocks
+            if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+
 def stream_event(rec):
     if is_noise(rec):
         return None
     t = rec.get("type")
     if t == "assistant":
+        tools = tool_uses(rec)
         text = assistant_text(rec)
-        if not text:               # tool_use-only / thinking-only: nothing to emit
-            return None
-        return {"type": "assistant", "text": text}
+        # Surface tool calls as a claude-`-p`-shaped assistant/message event so a
+        # consumer can read tool name+input (e.g. for live status labels); a
+        # text-only turn stays the flat {"type":"assistant","text":...} form.
+        if tools:
+            content = ([{"type": "text", "text": text}] if text else []) + tools
+            return {"type": "assistant", "message": {"content": content}}
+        if text:
+            return {"type": "assistant", "text": text}
+        return None                # thinking-only: nothing to emit
     if t == "user":
         msg = rec.get("message") or {}
         content = msg.get("content")
@@ -474,12 +489,19 @@ def show_history(db_path, n):
     return 0
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(
         prog="clawp", description="subscription-billed drop-in for `claude -p`")
     ap.add_argument("prompt", nargs="?")
     ap.add_argument("-p", "--print", action="store_true",
                     help="accepted no-op (clawp is always print)")
+    # Accepted-but-ignored `claude -p` flags, for drop-in argv compatibility.
+    # --no-session-persistence must NOT be forwarded: it suppresses the
+    # transcript jsonl that clawp reads the answer back from.
+    ap.add_argument("--verbose", action="store_true",
+                    help="accepted no-op (stream-json is always verbose)")
+    ap.add_argument("--no-session-persistence", action="store_true",
+                    help="accepted no-op (clawp needs the session transcript)")
     ap.add_argument("--output-format", choices=("text", "json", "stream-json"),
                     default="text")
     ap.add_argument("--resume")
@@ -500,7 +522,11 @@ def main():
         ap.add_argument(flag, dest="_unsupported_" + flag.lstrip("-"),
                         nargs="?", const=True, default=None)
 
-    args = ap.parse_args()
+    return ap
+
+
+def main():
+    args = build_parser().parse_args()
 
     if args.history:
         raise SystemExit(show_history(args.db, args.n))

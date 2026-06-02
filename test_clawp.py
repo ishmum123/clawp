@@ -67,6 +67,9 @@ THINK = {"type": "thinking", "thinking": "let me reason"}
 def txt(s):
     return {"type": "text", "text": s}
 TOOL_USE = {"type": "tool_use", "name": "Bash", "input": {}}
+# A tool_use carrying real name+input, the way a status-label consumer reads it.
+TOOL_USE_B = {"type": "tool_use", "id": "toolu_1", "name": "Bash",
+              "input": {"command": "bash scripts/query.sh"}}
 
 # stop_reason classification
 check("end_turn is terminal", clawp.is_terminal_assistant(asst("end_turn", [txt("hi")])))
@@ -120,7 +123,14 @@ check("stream_event maps assistant text",
       clawp.stream_event(asst("end_turn", [THINK, txt("hello")]))
       == {"type": "assistant", "text": "hello"})
 check("stream_event skips thinking-only assistant",
-      clawp.stream_event(asst("tool_use", [THINK, TOOL_USE])) is None)
+      clawp.stream_event(asst("tool_use", [THINK])) is None)
+check("stream_event emits tool_use as an assistant/message event",
+      clawp.stream_event(asst("tool_use", [THINK, TOOL_USE_B]))
+      == {"type": "assistant", "message": {"content": [TOOL_USE_B]}})
+check("stream_event keeps interstitial text alongside tool_use",
+      clawp.stream_event(asst("tool_use", [txt("Let me check."), TOOL_USE_B]))
+      == {"type": "assistant", "message": {"content": [
+          {"type": "text", "text": "Let me check."}, TOOL_USE_B]}})
 check("stream_event maps tool_result",
       clawp.stream_event({"type": "user", "message": {"role": "user",
        "content": [{"type": "tool_result", "content": "ok"}]}})
@@ -172,5 +182,14 @@ check("stream stops at terminal, no trailing leak",
 check("answer is the terminal record's text", _ans == "the answer")
 check("seen stops at the terminal record", _seen == 2)
 check("batch reports done at terminal", _done is True)
+
+# no-op compatibility flags: accepted for `claude -p` parity, never forwarded.
+_parser = clawp.build_parser()
+_args = _parser.parse_args(
+    ["--verbose", "--no-session-persistence", "--model", "opus", "hi"])
+check("no-op flags parse without error", _args.prompt == "hi")
+check("no-op flags are not forwarded to the launch",
+      clawp._passthrough_args(_args) == ["--model", "opus"])
+
 
 print("\nall passed")

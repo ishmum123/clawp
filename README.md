@@ -63,6 +63,8 @@ $ clawp --resume 9dc74688-c41a-4b66-bddf-fddfb56b7da6 "and two more"
 | flag | meaning |
 |------|---------|
 | `-p, --print` | accepted no-op (`clawp` is always print) — for `claude -p` compatibility |
+| `--verbose` | accepted no-op — `clawp`'s `stream-json` is already the full event stream |
+| `--no-session-persistence` | accepted no-op, **not** forwarded — `clawp` reads the answer from the session transcript, so it can't run with persistence off |
 | `--output-format text\|json\|stream-json` | `text` (default), one `result` JSON object, or live NDJSON events |
 | `--resume <id>` | continue a specific session (reloads prior context); `-c`/`--continue` not supported |
 | `--session-id <uuid>` | use this id instead of a generated one |
@@ -72,7 +74,7 @@ $ clawp --resume 9dc74688-c41a-4b66-bddf-fddfb56b7da6 "and two more"
 | `--history`, `-n <N>` | view recent logged turns instead of running |
 | `--model`, `--effort`, `--add-dir`, `--system-prompt`, `--permission-mode`, … | passed through to the interactive launch |
 
-Print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) are rejected with exit 2.
+A command line written for `claude -p` runs unchanged: session flags pass through to the launch; `-p`/`--print`, `--verbose`, and `--no-session-persistence` are accepted and ignored; print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) are rejected with exit 2.
 
 ## How it works
 
