@@ -15,7 +15,7 @@ clawp "prompt"
   │  session-id = uuid (or --resume <id>)
   ├─ session_lock (flock /tmp/clawp-<name>.lock, one turn/pane)
   ├─ ensure_session ── tmux new-session "claude --session-id <uuid> --permission-mode <mode>"
-  │                    clears trust prompt (one Enter), waits for idle prompt
+  │                    clears trust prompt (Enter) + bypass warning (--full-auto), waits for idle
   ├─ offset = len(read_records(transcript))   # before send; swallows prior turn's tail
   ├─ send_text ── prompt VERBATIM via bracketed paste
   ├─ capture loop (POLL=0.6s) — DUAL SIGNAL completion:
@@ -26,7 +26,7 @@ clawp "prompt"
   └─ _log_turn → INSERT into responses (sqlite) ── kill pane (every exit path)
 ```
 
-Transcript path is deterministic from the session-id: `~/.claude/projects/*/<session-id>.jsonl`. Spinner = an ellipsis (`…`) in the bottom screen region; idle = `Model:` in status bar and no dialog markers. Schema-break fallback: settled but zero parsed answer → text mode falls back to lossy `scrape_reply` (flagged `low_fidelity`); json/stream-json loud-fail.
+Transcript path is deterministic from the session-id: `~/.claude/projects/*/<session-id>.jsonl`. Spinner = an ellipsis (`…`) on a non-box line in the bottom region (the launch "What's new" box also uses `…`, so boxed `│` lines don't count); idle = any `IDLE_MARKERS` substring in the status bar (`Model:` / `shift+tab` / `/effort` — the bar text varies by version/plan) and no dialog markers. Schema-break fallback: settled but zero parsed answer → text mode falls back to lossy `scrape_reply` (flagged `low_fidelity`); json/stream-json loud-fail.
 
 **Permission modes:** default `acceptEdits`; `--full-auto` → `bypassPermissions` (unattended, trusted prompts only). `--permission-mode` passthrough overrides the default.
 
@@ -60,7 +60,7 @@ No build, lint, or package config. `test_clawp.py` is a plain script of `assert`
 
 - **Never** invoke `claude -p` / `--print` / any non-interactive mode — breaks the subscription-billing premise.
 - **Never inject** anything into the prompt — it goes out byte-verbatim; the answer comes from the transcript.
-- Never type into a permission/trust dialog to dismiss it (except the one-time trust-folder Enter in `ensure_session`); report the turn `blocked` instead.
+- Never type into a permission/trust dialog to dismiss it, except two one-time launch gates in `ensure_session`: the trust-folder Enter, and — only when the user chose bypass mode (`--full-auto`) — selecting "Yes, I accept" on the Bypass-Permissions warning (confirmed only once it is the highlighted row, never a blind Enter onto the default "No, exit"). Mid-turn permission prompts still report the turn `blocked`.
 
 ## Auto-generated / ignored
 

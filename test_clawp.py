@@ -54,6 +54,46 @@ check("permission dialog is not idle prompt", not clawp.at_idle_prompt(PERMISSIO
 
 check("scrape pulls the last assistant block", clawp.scrape_reply(DONE) == "2\n3")
 
+# Idle status bar varies by version/plan: 2.1.159 shows "Model: …" (with
+# non-breaking spaces); 2.1.143 on Claude Max shows only the mode/effort hints.
+IDLE_SERVER = (
+    " ▐▛███▜▌   Claude Code v2.1.143\n▝▜█████▛▘  Opus 4.7 with max effort · Claude Max\n"
+    "────────\n❯ \n────────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ◈ max · /effort\n"
+)
+IDLE_LOCAL = (
+    "────────\n❯\xa0\n────────\n"
+    "  Model:\xa0Opus\xa04.8\xa0|\xa0Ctx:\xa00\xa0|\xa0Ctx\xa0Used:\xa00.0%   ◐ medium · /effort\n"
+)
+check("idle detected on Max plan without 'Model:'", clawp.at_idle_prompt(IDLE_SERVER))
+check("idle detected with 'Model:' status bar", clawp.at_idle_prompt(IDLE_LOCAL))
+
+# First --full-auto launch on a box that never accepted bypass mode shows a
+# full-screen warning whose default option is "No, exit".
+BYPASS = (" WARNING: Claude Code running in Bypass Permissions mode\n"
+          " ❯ 1. No, exit\n   2. Yes, I accept\n")
+BYPASS_ON_2 = (" WARNING: Claude Code running in Bypass Permissions mode\n"
+               "   1. No, exit\n ❯ 2. Yes, I accept\n")
+check("bypass warning is a blocking dialog", clawp.looks_blocked(BYPASS))
+check("bypass warning is not the idle prompt", not clawp.at_idle_prompt(BYPASS))
+check("accept-confirm false while 'No, exit' is selected",
+      not clawp._accept_highlighted(BYPASS))
+check("accept-confirm true once 'Yes, I accept' is selected",
+      clawp._accept_highlighted(BYPASS_ON_2))
+
+# Fresh-launch idle shows a "What's new" box whose truncated rows end in "…".
+# Those live inside the box border (│); the real spinner line never does, so an
+# ellipsis sharing a line with a box rule must not read as a spinner.
+IDLE_WELCOME = (
+    "│   ▝▜█████▛▘   │ What's new                                            │\n"
+    "│              │ Added plugin dependency enforcement: disable-chain hi… │\n"
+    "│  Claude Max  │ Added worktree.bgIsolation for repos where worktrees… │\n"
+    "╰────────────────────────────────────────────────────────────────────╯\n"
+    "──────────\n❯\xa0Try \"write a test for <filepath>\"\n──────────\n"
+    "  ⏵⏵ accept edits on (shift+tab to cycle)                ◉ xhigh · /effort\n"
+)
+check("welcome-box ellipses are not a spinner", not clawp.has_spinner(IDLE_WELCOME))
+check("welcome-box launch screen is at idle prompt", clawp.at_idle_prompt(IDLE_WELCOME))
+
 
 # --- transcript parser (pure, no live claude) --------------------------------
 # Record shapes mirror the spec's Confirmed section.

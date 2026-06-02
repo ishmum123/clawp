@@ -58,11 +58,17 @@ ASSIST_RE = re.compile(r"^⏺\s?")           # assistant message start (scrape f
 PROMPT_RE = re.compile(r"^❯\s")            # input box / echoed prompt
 DONE_RE = re.compile(r"\bfor\s+\d+s\b")    # completion line: "✻ Baked for 2s"
 
-# Phrases that mean a blocking dialog (permission / trust) owns the screen.
+# Phrases that mean a blocking dialog (permission / trust / bypass) owns the
+# screen.
 DIALOG_MARKERS = (
     "Do you want", "don't ask again", "tell Claude what to do differently",
     "trust this folder", "Quick safety check", "No, and tell Claude",
+    "Bypass Permissions mode", "Yes, I accept",
 )
+# Substrings that mark the idle interactive status bar. Its text varies by
+# version/plan — "Model: …" on 2.1.159, "shift+tab to cycle" / "◈ max ·
+# /effort" on 2.1.143 Claude Max — so any one of these means we reached the bar.
+IDLE_MARKERS = ("Model:", "shift+tab", "/effort")
 
 # Print-only flags (claude --help: "only works with --print"); the interactive
 # TUI won't honor them, so reject loudly rather than forward.
@@ -98,8 +104,9 @@ def bottom_lines(screen, n=12):
 def has_spinner(screen):
     # Active work shows a gerund line with an ellipsis ("✳ Flambéing…") and/or a
     # "⎿ Running…" tool line; the idle "done" summary ("✻ Baked for 2s") has
-    # none. An ellipsis in the bottom region means claude is still going.
-    return any("…" in l for l in bottom_lines(screen))
+    # none. The fresh-launch "What's new" box also carries "…" in its truncated
+    # rows, but those sit inside the box border (│), so ignore boxed ellipses.
+    return any("…" in l and "│" not in l for l in bottom_lines(screen))
 
 
 def looks_blocked(screen):
@@ -107,16 +114,36 @@ def looks_blocked(screen):
 
 
 def at_idle_prompt(screen):
-    # The status bar ("Model: ...") is present on a normal interactive screen
-    # and absent when a full-screen dialog owns it.
-    return "Model:" in screen and not looks_blocked(screen)
+    # The status bar is present on a normal interactive screen and absent when a
+    # full-screen dialog owns it; its exact text varies (see IDLE_MARKERS).
+    return any(m in screen for m in IDLE_MARKERS) and not looks_blocked(screen)
+
+
+def _accept_highlighted(screen):
+    # The selected menu row carries the ❯ cursor; true only once "Yes, I accept"
+    # is the highlighted row, so we never confirm the default "No, exit".
+    return any("❯" in l and "Yes, I accept" in l for l in screen.splitlines())
+
+
+def _accept_bypass_dialog(name):
+    # Move the highlight off the default "No, exit", then confirm only once
+    # "Yes, I accept" is selected — never a blind Enter, which would quit claude.
+    tmux("send-keys", "-t", name, "Down")
+    for _ in range(4):
+        time.sleep(0.3)
+        if _accept_highlighted(capture(name)):
+            tmux("send-keys", "-t", name, "Enter")
+            return True
+    return False
 
 
 def ensure_session(name, cwd, claude_args):
-    """Launch the claude session if absent; clear trust prompt; wait until idle.
+    """Launch the claude session if absent; clear launch dialogs; wait until idle.
 
     claude_args is the full argv after `claude` (e.g. ["--session-id", uuid,
-    "--permission-mode", "acceptEdits"] or ["--resume", id, ...]).
+    "--permission-mode", "acceptEdits"] or ["--resume", id, ...]). Two one-time
+    launch gates are cleared here: the trust-folder prompt, and — only when the
+    user asked for bypass mode — the Bypass-Permissions warning.
     """
     if has_session(name):
         return
@@ -124,12 +151,22 @@ def ensure_session(name, cwd, claude_args):
          "-c", cwd, "claude", *claude_args)
     deadline = time.time() + READY_TIMEOUT
     trusted = False
+    bypassed = False
     while time.time() < deadline:
         screen = capture(name)
         if not trusted and ("trust this folder" in screen
                             or "Quick safety check" in screen):
             tmux("send-keys", "-t", name, "Enter")   # default = "Yes, I trust"
             trusted = True
+            time.sleep(1.0)
+            continue
+        # First bypass launch on an unaccepted box warns before the prompt. The
+        # user explicitly chose --full-auto, so accept it — one shot, so a missed
+        # keystroke can't loop the highlight back onto the default "No, exit".
+        if (not bypassed and "bypassPermissions" in claude_args
+                and "Yes, I accept" in screen):
+            bypassed = True
+            _accept_bypass_dialog(name)
             time.sleep(1.0)
             continue
         if at_idle_prompt(screen) and not has_spinner(screen):
