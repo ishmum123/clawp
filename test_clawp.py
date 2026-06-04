@@ -233,6 +233,20 @@ check("no-op flags parse without error", _args.prompt == "hi")
 check("no-op flags are not forwarded to the launch",
       clawp._passthrough_args(_args) == ["--model", "opus"])
 
+# --tools (built-in tool allowlist) is a session flag (no print-only note in
+# `claude --help`), so it's forwarded to the interactive launch verbatim. Like
+# its --allowedTools/--add-dir siblings, the value is one token (comma-separated).
+check("--tools is forwarded to the launch",
+      clawp._passthrough_args(
+          clawp.build_parser().parse_args(["--tools", "Bash,Edit", "hi"]))
+      == ["--tools", "Bash,Edit"])
+# `--tools ""` is claude's "disable the built-in toolset" (Skill/LSP still load).
+# The empty string must reach claude verbatim — absent (None) is dropped, "" is not.
+check("--tools empty-string is forwarded verbatim, not dropped like absent (None)",
+      clawp._passthrough_args(
+          clawp.build_parser().parse_args(["--tools", "", "hi"]))
+      == ["--tools", ""])
+
 # The idle backstop only decides a turn when no terminal transcript record
 # arrives; its stable window (STABLE_NEEDED * POLL) must outlast a natural
 # mid-turn streaming pause (~2.4s measured on 2.1.159) or it truncates early.

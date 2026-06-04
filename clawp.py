@@ -84,8 +84,8 @@ PRINT_ONLY_FLAGS = ("--max-turns", "--include-partial-messages",
 # Session flags forwarded verbatim to the interactive launch.
 PASSTHROUGH_FLAGS = ("--model", "--effort", "--add-dir", "--system-prompt",
                      "--append-system-prompt", "--allowedTools",
-                     "--disallowedTools", "--permission-mode", "--mcp-config",
-                     "--agents", "--settings")
+                     "--disallowedTools", "--tools", "--permission-mode",
+                     "--mcp-config", "--agents", "--settings")
 
 
 def tmux(*args, stdin_text=None):
