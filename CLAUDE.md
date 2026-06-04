@@ -30,6 +30,12 @@ Transcript path is deterministic from the session-id: `~/.claude/projects/*/<ses
 
 **Permission modes:** default `acceptEdits`; `--full-auto` → `bypassPermissions` (unattended, trusted prompts only). `--permission-mode` passthrough overrides the default.
 
+## Streaming input (claude-compatible multi-turn)
+
+`--input-format stream-json` (requires `--output-format stream-json`) runs ONE long-lived clawp process against ONE warm pane for a whole conversation. `run_stream_turns` reads NDJSON user turns from stdin (`{"type":"user","message":{"role":"user","content":...}}`), runs each through the shared `_run_turn` against the live pane, and emits claude-shaped stream-json: `system/init` once, then per turn a full `message_start…message_stop` envelope whose single `content_block_delta` carries the whole answer, then `result`. The pane is reaped when stdin closes (EOF = conversation over), so process lifetime = conversation lifetime — warmth/teardown need no flag. Scope is **sequential text turns**: no token-level streaming (whole-message granularity), no queuing/interrupts, no image content; a mid-stream permission/stall dialog ends the session (clawp can't answer it). The single-turn path keeps clawp's own simplified stream-json shape — only this mode emits the claude envelope. Design: `docs/stream-json-input.md`.
+
+**Prompt-prefix guard (`prefix_rejection`, both paths):** a prompt whose first non-blank char is `/` or `!` is refused before `send_text` — the TUI reads `/` as a command (hangs, no reply) and `!` as a shell command that **executes on the host** (`claude -p` does neither, so forwarding it would be an RCE the drop-in target lacks). `@` (file) and `#` (memory) still deliver the message, so they pass. Streaming refuses per-turn and the conversation continues; single-shot exits 2.
+
 ## Commands
 
 ```sh
@@ -38,13 +44,15 @@ python3 clawp.py "prompt"          # run a turn (text output)
 python3 clawp.py --output-format json "..."
 python3 clawp.py --resume <id> "..."
 python3 clawp.py --history -n 20   # view recent logged turns
+# streaming multi-turn: NDJSON user turns on stdin, one warm pane, claude-shaped events
+python3 clawp.py --input-format stream-json --output-format stream-json
 ```
 
 No build, lint, or package config. `test_clawp.py` is a plain script of `assert`-backed `check()` calls; run the whole file, there are no individual tests to select.
 
 ## CLI surface
 
-`clawp [flags] [prompt]`, mirroring `claude [options] [prompt]`. No subcommands. Prompt from positional arg else stdin; both empty → exit 2. Only `--history` is clawp's own (log viewer). `-p`/`--print` is an accepted no-op synonym. Print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) exit 2; session flags (`--model`, `--add-dir`, etc.) pass through to the launch.
+`clawp [flags] [prompt]`, mirroring `claude [options] [prompt]`. No subcommands. Prompt from positional arg else stdin; both empty → exit 2. Only `--history` is clawp's own (log viewer). `-p`/`--print` is an accepted no-op synonym. `--input-format stream-json` enables streaming-input mode (see below). The remaining print-only flags (`--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) exit 2; session flags (`--model`, `--add-dir`, etc.) pass through to the launch.
 
 ## Conventions
 

@@ -3,6 +3,8 @@
 
 Run: python3 test_clawp.py
 """
+import json
+
 import clawp
 
 # A finished turn: assistant block, "done" summary (no ellipsis), idle prompt.
@@ -262,6 +264,112 @@ check("send_text loads a pane-named buffer, not the shared unnamed one",
       _flag(_argv("load-buffer"), "-b") == "clawp-1a2b3c4d")
 check("send_text pastes that same pane-named buffer",
       _flag(_argv("paste-buffer"), "-b") == "clawp-1a2b3c4d")
+
+
+# --- stream-json input parser ------------------------------------------------
+# claude --input-format stream-json: one user message per stdin line. The parser
+# pulls out the prompt verbatim; non-user/malformed/empty lines are skipped (None).
+def user_msg(content):
+    return json.dumps({"type": "user", "message": {"role": "user",
+                       "content": content}, "parent_tool_use_id": None})
+
+check("input parser pulls string content",
+      clawp.stream_input_prompt(user_msg("hello there")) == "hello there")
+check("input parser joins text blocks",
+      clawp.stream_input_prompt(user_msg([txt("a "), txt("b")])) == "a b")
+check("input parser drops non-text blocks, keeps text",
+      clawp.stream_input_prompt(user_msg(
+          [{"type": "image", "source": {}}, txt("caption")])) == "caption")
+check("input parser ignores non-user records",
+      clawp.stream_input_prompt(json.dumps({"type": "result", "result": "x"})) is None)
+check("input parser ignores malformed json",
+      clawp.stream_input_prompt("{not json") is None)
+check("input parser ignores empty string content",
+      clawp.stream_input_prompt(user_msg("")) is None)
+check("input parser ignores image-only content",
+      clawp.stream_input_prompt(user_msg([{"type": "image", "source": {}}])) is None)
+check("input parser ignores missing content",
+      clawp.stream_input_prompt(json.dumps({"type": "user", "message": {}})) is None)
+check("input parser preserves a leading slash verbatim",
+      clawp.stream_input_prompt(user_msg("/compact please")) == "/compact please")
+
+# Leading '/' and '!' can't be sent (TUI command / shell mode); '@', '#', and a
+# mid-text slash are fine. The parser still extracts verbatim above — the guard is
+# a separate, explicit refusal that happens before send.
+check("prefix guard rejects leading slash", clawp.prefix_rejection("/help") is not None)
+check("prefix guard rejects leading bang", clawp.prefix_rejection("!touch x") is not None)
+check("prefix guard rejects leading bang after whitespace",
+      clawp.prefix_rejection("  !rm -rf x") is not None)
+check("prefix guard allows leading at", clawp.prefix_rejection("@file.py explain") is None)
+check("prefix guard allows leading hash", clawp.prefix_rejection("#note this") is None)
+check("prefix guard allows a mid-text slash", clawp.prefix_rejection("what is 6/2?") is None)
+check("prefix guard allows normal text", clawp.prefix_rejection("hello there") is None)
+check("prefix guard allows empty", clawp.prefix_rejection("") is None)
+
+
+# --- mid-turn block detection (issue-1: warm-pane / answer-prose markers) -----
+# A real dialog OWNS the screen: a marker is present AND the idle status bar is
+# gone. Answer prose quoting a marker ("Do you want…"), or a prior turn's marker
+# left in a warm pane's scrollback, keeps the status bar — so it must NOT block.
+ANSWER_WITH_MARKER = (
+    "❯ what next?\n\n"
+    "⏺ Good question. Do you want to start with the data model or the API?\n\n"
+    "✻ Baked for 2s\n\n"
+    "────────\n❯ \n────────\n"
+    "  Model: Opus 4.8 | Ctx: 0 | Ctx Used: 0.0%\n  -- INSERT --\n"
+)
+check("has_idle_bar present on a finished turn", clawp.has_idle_bar(DONE))
+check("has_idle_bar absent during a permission dialog", not clawp.has_idle_bar(PERMISSION))
+check("turn_blocked: real permission dialog blocks", clawp.turn_blocked(PERMISSION))
+check("turn_blocked: trust dialog blocks", clawp.turn_blocked(TRUST))
+check("turn_blocked: bypass warning blocks", clawp.turn_blocked(BYPASS))
+check("turn_blocked: answer quoting a marker does NOT block (idle bar present)",
+      not clawp.turn_blocked(ANSWER_WITH_MARKER))
+check("turn_blocked: plain finished turn does not block", not clawp.turn_blocked(DONE))
+# at_idle_prompt still holds after the has_idle_bar refactor.
+check("at_idle_prompt unchanged on a finished turn", clawp.at_idle_prompt(DONE))
+check("at_idle_prompt false during a permission dialog", not clawp.at_idle_prompt(PERMISSION))
+
+
+# --- claude-shaped stream-json output (streaming-input mode) ------------------
+# One turn -> a full message envelope carrying the whole answer as one delta, the
+# assembled assistant message, then the result; preceded once by a system/init.
+_init = clawp._init_event("sess-123", "claude-sonnet-4-6", "/tmp/x")
+check("init event is system/init carrying the session id",
+      _init["type"] == "system" and _init["subtype"] == "init"
+      and _init["session_id"] == "sess-123")
+
+_evs = clawp._turn_events("the answer", "sess-123", "claude-sonnet-4-6", 1200, 2)
+def _etype(e):
+    return e["event"]["type"] if e["type"] == "stream_event" else e["type"]
+check("turn events are the full claude envelope, in order",
+      [_etype(e) for e in _evs] == [
+          "message_start", "content_block_start", "content_block_delta",
+          "content_block_stop", "message_delta", "message_stop",
+          "assistant", "result"])
+_delta = next(e for e in _evs if _etype(e) == "content_block_delta")
+check("the whole answer rides a single text_delta",
+      _delta["event"]["delta"] == {"type": "text_delta", "text": "the answer"})
+check("assembled assistant message carries the text",
+      next(e for e in _evs if e["type"] == "assistant")["message"]["content"]
+      == [{"type": "text", "text": "the answer"}])
+_res = _evs[-1]
+check("final result carries answer, session id, not-error",
+      _res["type"] == "result" and _res["subtype"] == "success"
+      and _res["result"] == "the answer" and _res["session_id"] == "sess-123"
+      and _res["is_error"] is False)
+check("every stream_event is tagged with the session id",
+      all(e["session_id"] == "sess-123" for e in _evs if e["type"] == "stream_event"))
+
+# --input-format is now implemented (a real flag), not rejected as print-only.
+check("--input-format removed from print-only rejects",
+      "--input-format" not in clawp.PRINT_ONLY_FLAGS)
+check("--input-format parses as a real flag",
+      clawp.build_parser().parse_args(
+          ["--input-format", "stream-json", "--output-format", "stream-json"]
+      ).input_format == "stream-json")
+check("--input-format defaults to text",
+      clawp.build_parser().parse_args(["hi"]).input_format == "text")
 
 
 print("\nall passed")

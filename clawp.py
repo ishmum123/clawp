@@ -71,9 +71,15 @@ DIALOG_MARKERS = (
 # /effort" on 2.1.143 Claude Max — so any one of these means we reached the bar.
 IDLE_MARKERS = ("Model:", "shift+tab", "/effort")
 
+# A prompt whose first non-blank char is one of these can't be sent as a message:
+# the interactive TUI reads a leading '/' as a command (no reply — clawp would hang)
+# and '!' as a shell command (it RUNS the rest — an RCE that `claude -p` does NOT
+# have). '@' (file) and '#' (memory) still deliver the message, so they're allowed.
+TUI_COMMAND_PREFIXES = ("/", "!")
+
 # Print-only flags (claude --help: "only works with --print"); the interactive
 # TUI won't honor them, so reject loudly rather than forward.
-PRINT_ONLY_FLAGS = ("--input-format", "--max-turns", "--include-partial-messages",
+PRINT_ONLY_FLAGS = ("--max-turns", "--include-partial-messages",
                     "--fallback-model", "--json-schema", "--replay-user-messages")
 # Session flags forwarded verbatim to the interactive launch.
 PASSTHROUGH_FLAGS = ("--model", "--effort", "--add-dir", "--system-prompt",
@@ -114,10 +120,23 @@ def looks_blocked(screen):
     return any(m in screen for m in DIALOG_MARKERS)
 
 
+def has_idle_bar(screen):
+    # The interactive status bar; absent when a dialog owns the screen. Its exact
+    # text varies by version/plan (see IDLE_MARKERS).
+    return any(m in screen for m in IDLE_MARKERS)
+
+
 def at_idle_prompt(screen):
-    # The status bar is present on a normal interactive screen and absent when a
-    # full-screen dialog owns it; its exact text varies (see IDLE_MARKERS).
-    return any(m in screen for m in IDLE_MARKERS) and not looks_blocked(screen)
+    return has_idle_bar(screen) and not looks_blocked(screen)
+
+
+def turn_blocked(screen):
+    # Mid-turn block test for the capture loop. A real permission/trust dialog owns
+    # the screen: a marker is present AND the status bar is gone. Robust on a warm
+    # pane reused across turns, where a prior answer's marker text — or the current
+    # answer quoting "Do you want…" — sits in the capture while the bar is still
+    # there; looks_blocked alone would false-positive on that.
+    return looks_blocked(screen) and not has_idle_bar(screen)
 
 
 def _accept_highlighted(screen):
@@ -193,6 +212,40 @@ def send_text(name, text):
     tmux("paste-buffer", "-d", "-p", "-b", name, "-t", name)   # -p = bracketed paste
     time.sleep(0.4)
     tmux("send-keys", "-t", name, "Enter")
+
+
+def stream_input_prompt(line):
+    # claude --input-format stream-json: one user message per stdin line. Pull the
+    # prompt text out (sent verbatim by send_text); non-user/malformed/empty lines
+    # return None and are skipped. Text blocks are joined; non-text content (images)
+    # can't be pasted into the TUI, so it's dropped.
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if obj.get("type") != "user":
+        return None
+    content = (obj.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content or None
+    if isinstance(content, list):
+        text = "".join(b.get("text", "") for b in content
+                       if isinstance(b, dict) and b.get("type") == "text")
+        return text or None
+    return None
+
+
+def prefix_rejection(prompt):
+    # A leading '/' or '!' (after any whitespace) is intercepted by the interactive
+    # TUI: '/' opens command mode (no reply), '!' runs the rest as a shell command.
+    # Such a prompt can't be sent verbatim as a message, so return a reason and let
+    # the caller refuse before send_text — never pasting (or, for '!', running) it.
+    head = prompt.lstrip()
+    if head[:1] in TUI_COMMAND_PREFIXES:
+        return (f"prompt starts with {head[0]!r}: the TUI reads a leading '/' as a "
+                f"command and '!' as a shell command, so it can't be sent as a "
+                f"message (rephrase or quote it)")
+    return None
 
 
 def scrape_reply(screen):
@@ -369,9 +422,11 @@ def _log_turn(db_path, turn_id, session_id, prompt, reply, seconds, meta):
 
 
 class CwError(SystemExit):
-    def __init__(self, code, msg):
+    def __init__(self, code, msg, meta=None):
         super().__init__(code)
         sys.stderr.write(f"[clawp] {msg}\n")
+        self.msg = msg
+        self.meta = meta            # carried so a caller's per-turn log keeps it
 
 
 def _passthrough_args(args):
@@ -383,18 +438,151 @@ def _passthrough_args(args):
     return out
 
 
-def run_print_turn(args, cwd, db_path):
-    fresh = args.resume is None
-    session_id = args.session_id or args.resume or str(uuid.uuid4())
-    name = "clawp-" + session_id[:8]
+def _launch_args(args, session_id, fresh):
     mode = "bypassPermissions" if args.full_auto else "acceptEdits"
-
     claude_args = ["--session-id", session_id] if fresh \
         else ["--resume", session_id]
     # explicit --permission-mode passthrough overrides the default mode.
     if args.permission_mode is None:
         claude_args += ["--permission-mode", mode]
     claude_args += _passthrough_args(args)
+    return claude_args
+
+
+def _init_event(session_id, model, cwd):
+    # claude-shaped session bootstrap; a consumer reads session_id from here.
+    return {"type": "system", "subtype": "init", "session_id": session_id,
+            "model": model, "cwd": cwd, "tools": [], "mcp_servers": []}
+
+
+def _turn_events(answer, session_id, model, duration_ms, num_turns):
+    # claude --output-format stream-json for ONE completed turn. clawp only ever has
+    # the whole message, so the partial-message envelope carries the full answer as a
+    # single text delta; emitting the entire message_start…message_stop envelope (not
+    # a lone delta) keeps a strict SSE consumer in sync. The assembled `assistant`
+    # message and the `result` follow, for base (non-partial) consumers.
+    msg = {"id": "msg_" + uuid.uuid4().hex[:24], "type": "message",
+           "role": "assistant", "model": model,
+           "content": [{"type": "text", "text": answer}], "stop_reason": "end_turn"}
+
+    def se(event):
+        return {"type": "stream_event", "session_id": session_id, "event": event}
+
+    return [
+        se({"type": "message_start", "message": {**msg, "content": []}}),
+        se({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "text", "text": ""}}),
+        se({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "text_delta", "text": answer}}),
+        se({"type": "content_block_stop", "index": 0}),
+        se({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+        se({"type": "message_stop"}),
+        {"type": "assistant", "message": msg, "session_id": session_id},
+        {"type": "result", "subtype": "success", "session_id": session_id,
+         "result": answer, "is_error": False, "duration_ms": duration_ms,
+         "num_turns": num_turns},
+    ]
+
+
+def _run_turn(name, session_id, path, prompt, fmt, stream):
+    # One turn against an already-live pane: send the prompt, then watch the
+    # transcript (primary) with a screen backstop until it settles. Returns
+    # (answer, meta, path); emits clawp's per-record events when stream=True. Raises
+    # CwError (meta attached for the caller's log) on a blocked/stalled/over-long
+    # turn. Caller owns the lock, ensure_session, logging, and pane teardown.
+    if path is None:
+        path = find_transcript(session_id)
+    # Offset (record count) at send time swallows the previous turn's trailing
+    # system/summary records; file may not exist yet on a fresh session (offset 0).
+    offset = len(read_records(path))
+
+    send_text(name, prompt)
+    time.sleep(SEND_SETTLE)
+
+    answer = None
+    meta = _meta(False, False)
+    start = time.time()
+    last_screen = None
+    stable = 0
+    last_change = start
+    seen = offset
+    while time.time() - start < MAX_TURN:
+        if path is None:
+            path = find_transcript(session_id)
+        records = read_records(path)
+        new = records[seen:]
+        # Stop AT the terminal record: a record flushed after end_turn in the same
+        # batch must not leak into the stream.
+        done = False
+        for rec in new:
+            seen += 1
+            if is_terminal_assistant(rec):
+                answer = assistant_text(rec)
+                if stream:
+                    ev = stream_event(rec)
+                    if ev is not None:
+                        print(json.dumps(ev), flush=True)
+                done = True
+                break
+            if stream:
+                ev = stream_event(rec)
+                if ev is not None:
+                    print(json.dumps(ev), flush=True)
+        if done:
+            break
+
+        screen = capture(name)
+        now = time.time()
+        if screen == last_screen:
+            stable += 1
+        else:
+            stable = 1
+            last_screen = screen
+            last_change = now
+        if turn_blocked(screen):
+            raise CwError(3, "blocked: permission/trust dialog (use --full-auto "
+                          "for unattended runs)",
+                          meta=_meta(False, False, blocked=True, note="blocked"))
+        if now - last_change >= STALL_SECS:
+            raise CwError(4, "stall: screen frozen, no terminal stop_reason",
+                          meta=_meta(False, True, note="stalled"))
+        if has_spinner(screen):
+            time.sleep(POLL)
+            continue
+        # idle backstop: quiet, idle, no spinner, no terminal record. Gate on
+        # seen>offset (a record arrived this turn) so a warm pane's stale pre-send
+        # screen — idle bar already present — can't settle into a false completion
+        # before the turn has produced anything.
+        if stable >= STABLE_NEEDED and has_idle_bar(screen) and seen > offset:
+            break
+        time.sleep(POLL)
+    else:
+        raise CwError(4, "timeout: turn exceeded MAX_TURN",
+                      meta=_meta(False, True, note="max turn"))
+
+    # Schema-break fallback: settled but parsed no usable answer. Slice by offset so
+    # a resumed/multi-turn transcript can't return a PRIOR turn's answer.
+    if not answer:
+        answer = final_answer(read_records(path)[offset:])
+    if not answer:
+        ver = claude_version(capture(name))
+        vsfx = f" on Claude Code v{ver}" if ver else ""
+        if fmt == "text":
+            answer = scrape_reply(capture(name))
+            meta = _meta(True, False, note="schema unrecognized" + vsfx)
+        else:
+            raise CwError(5, "transcript schema unrecognized" + vsfx
+                          + " (zero usable answer; json/stream-json cannot be "
+                          "faithfully scraped)",
+                          meta=_meta(False, True, note="schema unrecognized" + vsfx))
+    return answer, meta, path
+
+
+def run_print_turn(args, cwd, db_path):
+    fresh = args.resume is None
+    session_id = args.session_id or args.resume or str(uuid.uuid4())
+    name = "clawp-" + session_id[:8]
+    claude_args = _launch_args(args, session_id, fresh)
 
     fmt = args.output_format
     stream = fmt == "stream-json"
@@ -409,90 +597,14 @@ def run_print_turn(args, cwd, db_path):
             try:
                 ensure_session(name, cwd, claude_args)
             except TimeoutError as e:
-                meta = _meta(False, True, note="launch failed")
-                raise CwError(5, str(e))
-
+                raise CwError(5, str(e), meta=_meta(False, True, note="launch failed"))
             path = find_transcript(session_id)
-            # Offset (record count, consistent with read_records) taken at send
-            # time swallows the previous turn's trailing system/summary records;
-            # file may not exist yet on a fresh session (offset 0).
-            offset = len(read_records(path))
-
-            send_text(name, args.prompt)
-            time.sleep(SEND_SETTLE)
-
-            start = time.time()
-            last_screen = None
-            stable = 0
-            last_change = start
-            seen = offset
-            while time.time() - start < MAX_TURN:
-                if path is None:
-                    path = find_transcript(session_id)
-                records = read_records(path)
-                new = records[seen:]
-                # Stop AT the terminal record: a record flushed after end_turn
-                # in the same batch must not leak into the stream.
-                done = False
-                for rec in new:
-                    seen += 1
-                    if is_terminal_assistant(rec):
-                        answer = assistant_text(rec)
-                        if stream:
-                            ev = stream_event(rec)
-                            if ev is not None:
-                                print(json.dumps(ev), flush=True)
-                        done = True
-                        break
-                    if stream:
-                        ev = stream_event(rec)
-                        if ev is not None:
-                            print(json.dumps(ev), flush=True)
-                if done:
-                    break
-
-                screen = capture(name)
-                now = time.time()
-                if screen == last_screen:
-                    stable += 1
-                else:
-                    stable = 1
-                    last_screen = screen
-                    last_change = now
-                if looks_blocked(screen):
-                    meta = _meta(False, False, blocked=True, note="blocked")
-                    raise CwError(3, "blocked: permission/trust dialog "
-                                  "(use --full-auto for unattended runs)")
-                if now - last_change >= STALL_SECS:
-                    meta = _meta(False, True, note="stalled")
-                    raise CwError(4, "stall: screen frozen, no terminal "
-                                  "stop_reason")
-                if has_spinner(screen):
-                    time.sleep(POLL)
-                    continue
-                # idle backstop: quiet, idle, no spinner, no terminal record.
-                if stable >= STABLE_NEEDED and at_idle_prompt(screen):
-                    break
-                time.sleep(POLL)
-            else:
-                meta = _meta(False, True, note="max turn")
-                raise CwError(4, "timeout: turn exceeded MAX_TURN")
-
-            # Schema-break fallback: settled but parsed no usable answer. Slice
-            # by offset so a resumed/multi-turn transcript can't return a PRIOR
-            # turn's answer.
-            if not answer:
-                answer = final_answer(read_records(path)[offset:])
-            if not answer:
-                ver = claude_version(capture(name))
-                vsfx = f" on Claude Code v{ver}" if ver else ""
-                if fmt == "text":
-                    answer = scrape_reply(capture(name))
-                    meta = _meta(True, False, note="schema unrecognized" + vsfx)
-                else:
-                    raise CwError(5, "transcript schema unrecognized" + vsfx
-                                  + " (zero usable answer; json/stream-json "
-                                  "cannot be faithfully scraped)")
+            answer, meta, path = _run_turn(name, session_id, path, args.prompt,
+                                           fmt, stream)
+        except CwError as e:
+            if e.meta is not None:
+                meta = e.meta
+            raise
         finally:
             seconds = round(time.time() - t0, 1)
             _log_turn(db_path, turn_id, session_id, args.prompt, answer or "",
@@ -512,6 +624,71 @@ def run_print_turn(args, cwd, db_path):
                           "session_id": session_id, "result": answer,
                           "is_error": False,
                           "duration_ms": int(seconds * 1000)}), flush=stream)
+    return 0
+
+
+def run_stream_turns(args, cwd, db_path):
+    # claude-compatible --input-format stream-json: one long-lived clawp process and
+    # ONE warm pane for the whole conversation. Read NDJSON user turns from stdin,
+    # run each against the live pane, emit claude-shaped stream-json, and reap the
+    # pane when stdin closes (EOF = conversation over). A blocked/stalled turn ends
+    # the session: the dialog owns the pane and clawp can't answer it.
+    fresh = args.resume is None
+    session_id = args.session_id or args.resume or str(uuid.uuid4())
+    name = "clawp-" + session_id[:8]
+    claude_args = _launch_args(args, session_id, fresh)
+    model = args.model or "default"
+    turns = 0
+    with session_lock(name):
+        try:
+            try:
+                ensure_session(name, cwd, claude_args)
+            except TimeoutError as e:
+                raise CwError(5, str(e))
+            print(json.dumps(_init_event(session_id, model, cwd)), flush=True)
+            path = find_transcript(session_id)
+            # readline (not `for line in sys.stdin`) so each turn is processed as
+            # soon as the caller writes it — iterator read-ahead would buffer it.
+            for line in iter(sys.stdin.readline, ""):
+                prompt = stream_input_prompt(line)
+                if prompt is None:          # non-user / malformed / empty line
+                    continue
+                turns += 1
+                t0 = time.time()
+                turn_id = (datetime.datetime.now().strftime("%Y%m%d-%H%M%S-")
+                           + uuid.uuid4().hex[:4])
+                rej = prefix_rejection(prompt)
+                if rej:
+                    # Refuse without sending — the pane is untouched, so the
+                    # conversation survives and the next turn proceeds.
+                    print(json.dumps({"type": "result", "subtype": "error",
+                                      "session_id": session_id, "is_error": True,
+                                      "result": rej, "num_turns": turns}), flush=True)
+                    _log_turn(db_path, turn_id, session_id, prompt, "",
+                              round(time.time() - t0, 1),
+                              _meta(False, False, note="rejected (TUI prefix)"))
+                    continue
+                answer, meta = None, _meta(False, False)
+                try:
+                    answer, meta, path = _run_turn(name, session_id, path, prompt,
+                                                   "stream-json", False)
+                    ms = int((time.time() - t0) * 1000)
+                    for ev in _turn_events(answer, session_id, model, ms, turns):
+                        print(json.dumps(ev), flush=True)
+                except CwError as e:
+                    if e.meta is not None:
+                        meta = e.meta
+                    # surface the failure on the stream before the session ends
+                    print(json.dumps({"type": "result", "subtype": "error",
+                                      "session_id": session_id, "is_error": True,
+                                      "result": e.msg}), flush=True)
+                    raise
+                finally:
+                    seconds = round(time.time() - t0, 1)
+                    _log_turn(db_path, turn_id, session_id, prompt, answer or "",
+                              seconds, meta)
+        finally:
+            tmux("kill-session", "-t", name)
     return 0
 
 
@@ -546,6 +723,10 @@ def build_parser():
                     help="accepted no-op (clawp needs the session transcript)")
     ap.add_argument("--output-format", choices=("text", "json", "stream-json"),
                     default="text")
+    ap.add_argument("--input-format", choices=("text", "stream-json"),
+                    default="text",
+                    help="stream-json: multi-turn NDJSON turns over stdin against "
+                         "one warm pane (requires --output-format stream-json)")
     ap.add_argument("--resume")
     ap.add_argument("--session-id")
     ap.add_argument("--full-auto", action="store_true",
@@ -577,12 +758,23 @@ def main():
         if getattr(args, "_unsupported_" + flag.lstrip("-")) is not None:
             raise CwError(2, f"{flag}: unsupported by clawp (print-only feature)")
 
+    # Streaming input: stdin is an NDJSON turn stream, not a single prompt.
+    if args.input_format == "stream-json":
+        if args.output_format != "stream-json":
+            raise CwError(2, "--input-format stream-json requires "
+                          "--output-format stream-json")
+        raise SystemExit(run_stream_turns(args, args.cwd, args.db))
+
     if not args.prompt or args.prompt == "-":
         if sys.stdin.isatty():
             raise CwError(2, "no prompt (positional arg or stdin)")
         args.prompt = sys.stdin.read().strip()
         if not args.prompt:
             raise CwError(2, "no prompt (positional arg or stdin)")
+
+    rej = prefix_rejection(args.prompt)
+    if rej:
+        raise CwError(2, rej)
 
     raise SystemExit(run_print_turn(args, args.cwd, args.db))
 
