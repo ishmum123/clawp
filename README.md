@@ -92,7 +92,8 @@ Stored columns: `id, ts, session, prompt, reply, seconds, low_fidelity, timed_ou
 - **Sweet spot is Q&A and light, mostly-edit tasks.** Tool-using turns work, but `clawp` reconstructs against a TUI what `claude -p --output-format stream-json` gives natively; the more autonomous the work, the more the fragility shows.
 - **Per-call launch latency.** Each call spins up an ephemeral pane and waits for the idle prompt (a warm pool for the resume path is on the roadmap).
 - **If a permission prompt appears** (restrictive config, no `--full-auto`), the turn is reported `blocked` (exit 3) rather than answered. Use `--full-auto` for unattended runs that touch web/bash. The first `--full-auto` launch on a machine that has never accepted bypass mode auto-clears the one-time Bypass-Permissions warning.
-- **No token-level partials.** The transcript stores whole messages, so `--include-partial-messages` cannot be reproduced.
+- **No token-level partials.** The transcript stores whole messages, so `--include-partial-messages` is accepted but a no-op (the answer lands in one chunk).
+- **Don't scrub clawp's env.** It runs interactive `claude` for auth — spawn it with a restricted env (allowlist, systemd, sandbox) and it can't find your login (`Not logged in`). Include `HOME PATH USER SHELL LANG TERM`.
 - **One turn at a time per pane** — a concurrent run against the same session fails fast; distinct session-ids run in parallel.
 - Developed against macOS, tmux 3.5a, Claude Code v2.1.x.
 
