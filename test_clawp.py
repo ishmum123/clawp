@@ -3,7 +3,9 @@
 
 Run: python3 test_clawp.py
 """
+import io
 import json
+import sys
 
 import clawp
 
@@ -384,6 +386,58 @@ check("--input-format parses as a real flag",
       ).input_format == "stream-json")
 check("--input-format defaults to text",
       clawp.build_parser().parse_args(["hi"]).input_format == "text")
+
+# --include-partial-messages: claude's token-level-delta toggle, which "only works
+# with --output-format=stream-json". clawp can't emit partials (it reads completed
+# transcript records), but its stream-json envelope already carries a whole-answer
+# delta, so the flag is a no-op there and a hard error for text/json — mirroring
+# claude's own constraint. The other print-only flags change the result/protocol,
+# so they still loud-fail unconditionally.
+check("--include-partial-messages removed from print-only rejects",
+      "--include-partial-messages" not in clawp.PRINT_ONLY_FLAGS)
+check("--include-partial-messages parses as a real boolean flag",
+      clawp.build_parser().parse_args(
+          ["--include-partial-messages", "--output-format", "stream-json", "hi"]
+      ).include_partial_messages is True)
+check("--include-partial-messages defaults off",
+      clawp.build_parser().parse_args(["hi"]).include_partial_messages is False)
+check("--include-partial-messages is not forwarded to the launch",
+      clawp._passthrough_args(clawp.build_parser().parse_args(
+          ["--include-partial-messages", "--output-format", "stream-json", "hi"]))
+      == [])
+
+def _flag_check_code(argv):
+    real = sys.stderr            # CwError writes to stderr on construct; mute it
+    sys.stderr = io.StringIO()
+    try:
+        clawp._check_unsupported_flags(clawp.build_parser().parse_args(argv))
+        return None
+    except clawp.CwError as e:
+        return e.code
+    finally:
+        sys.stderr = real
+
+check("--include-partial-messages is a no-op under stream-json (no raise)",
+      _flag_check_code(
+          ["--include-partial-messages", "--output-format", "stream-json", "hi"])
+      is None)
+check("--include-partial-messages exits 2 for text output",
+      _flag_check_code(["--include-partial-messages", "hi"]) == 2)
+check("--include-partial-messages exits 2 for json output",
+      _flag_check_code(
+          ["--include-partial-messages", "--output-format", "json", "hi"]) == 2)
+check("other print-only flags still exit 2 even under stream-json",
+      _flag_check_code(
+          ["--max-turns", "5", "--output-format", "stream-json", "hi"]) == 2)
+
+# --max-budget-usd is claude's current print-only work-bound flag (successor to the
+# removed --max-turns). clawp can't honor it and must not silently drop it (it
+# bounds the agent's work → changes the result), so it joins the reject set and gets
+# clawp's curated message instead of argparse's generic "unrecognized arguments".
+check("--max-budget-usd is in the print-only reject set",
+      "--max-budget-usd" in clawp.PRINT_ONLY_FLAGS)
+check("--max-budget-usd exits 2 with clawp's curated reject",
+      _flag_check_code(["--max-budget-usd", "5", "hi"]) == 2)
 
 
 print("\nall passed")

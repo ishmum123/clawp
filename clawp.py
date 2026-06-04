@@ -78,9 +78,13 @@ IDLE_MARKERS = ("Model:", "shift+tab", "/effort")
 TUI_COMMAND_PREFIXES = ("/", "!")
 
 # Print-only flags (claude --help: "only works with --print"); the interactive
-# TUI won't honor them, so reject loudly rather than forward.
-PRINT_ONLY_FLAGS = ("--max-turns", "--include-partial-messages",
-                    "--fallback-model", "--json-schema", "--replay-user-messages")
+# TUI won't honor them, and each changes the result/protocol if ignored, so reject
+# loudly rather than forward. --max-budget-usd is claude's current work-bound knob;
+# --max-turns is its removed predecessor, kept so old-claude scripts still fail loud.
+# (--include-partial-messages is handled separately: it only affects stream
+# granularity, so it's a tolerated no-op under stream-json.)
+PRINT_ONLY_FLAGS = ("--max-turns", "--max-budget-usd", "--fallback-model",
+                    "--json-schema", "--replay-user-messages")
 # Session flags forwarded verbatim to the interactive launch.
 PASSTHROUGH_FLAGS = ("--model", "--effort", "--add-dir", "--system-prompt",
                      "--append-system-prompt", "--allowedTools",
@@ -727,6 +731,12 @@ def build_parser():
                     default="text",
                     help="stream-json: multi-turn NDJSON turns over stdin against "
                          "one warm pane (requires --output-format stream-json)")
+    # No-op under stream-json: clawp can't emit token-level partials (it reads
+    # completed transcript records), but the envelope's whole-answer delta satisfies
+    # a lenient SSE consumer. Rejected for text/json in _check_unsupported_flags,
+    # mirroring claude's "only works with --output-format=stream-json" constraint.
+    ap.add_argument("--include-partial-messages", action="store_true",
+                    help="accepted no-op (stream-json only)")
     ap.add_argument("--resume")
     ap.add_argument("--session-id")
     ap.add_argument("--full-auto", action="store_true",
@@ -748,15 +758,25 @@ def build_parser():
     return ap
 
 
+def _check_unsupported_flags(args):
+    for flag in PRINT_ONLY_FLAGS:
+        if getattr(args, "_unsupported_" + flag.lstrip("-")) is not None:
+            raise CwError(2, f"{flag}: unsupported by clawp (print-only feature)")
+    # claude's --include-partial-messages only works with stream-json; clawp honors
+    # it as a no-op there (it can't produce token-level partials, but the envelope's
+    # whole-answer delta is valid stream-json) and rejects it for text/json.
+    if args.include_partial_messages and args.output_format != "stream-json":
+        raise CwError(2, "--include-partial-messages requires "
+                      "--output-format stream-json")
+
+
 def main():
     args = build_parser().parse_args()
 
     if args.history:
         raise SystemExit(show_history(args.db, args.n))
 
-    for flag in PRINT_ONLY_FLAGS:
-        if getattr(args, "_unsupported_" + flag.lstrip("-")) is not None:
-            raise CwError(2, f"{flag}: unsupported by clawp (print-only feature)")
+    _check_unsupported_flags(args)
 
     # Streaming input: stdin is an NDJSON turn stream, not a single prompt.
     if args.input_format == "stream-json":

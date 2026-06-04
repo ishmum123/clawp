@@ -52,7 +52,7 @@ No build, lint, or package config. `test_clawp.py` is a plain script of `assert`
 
 ## CLI surface
 
-`clawp [flags] [prompt]`, mirroring `claude [options] [prompt]`. No subcommands. Prompt from positional arg else stdin; both empty → exit 2. Only `--history` is clawp's own (log viewer). `-p`/`--print` is an accepted no-op synonym. `--input-format stream-json` enables streaming-input mode (see below). The remaining print-only flags (`--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) exit 2; session flags (`--model`, `--add-dir`, etc.) pass through to the launch.
+`clawp [flags] [prompt]`, mirroring `claude [options] [prompt]`. No subcommands. Prompt from positional arg else stdin; both empty → exit 2. Only `--history` is clawp's own (log viewer). `-p`/`--print` is an accepted no-op synonym. `--input-format stream-json` enables streaming-input mode (see below). `--include-partial-messages` is a no-op under `--output-format stream-json` (clawp reads completed transcript records, so it can't emit token-level partials, but the envelope's whole-answer delta is valid stream-json) and exits 2 for text/json — mirroring claude's "only works with stream-json" rule. The remaining print-only flags (`--max-turns`, `--max-budget-usd`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) exit 2; session flags (`--model`, `--add-dir`, etc.) pass through to the launch.
 
 ## Conventions
 
