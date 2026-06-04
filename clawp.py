@@ -90,6 +90,9 @@ PASSTHROUGH_FLAGS = ("--model", "--effort", "--add-dir", "--system-prompt",
                      "--append-system-prompt", "--allowedTools",
                      "--disallowedTools", "--tools", "--permission-mode",
                      "--mcp-config", "--agents", "--settings")
+# Boolean session flags: forwarded as a bare flag (no value) when set. Separate
+# from PASSTHROUGH_FLAGS because those each carry one value; these carry none.
+BOOL_PASSTHROUGH_FLAGS = ("--disable-slash-commands",)
 
 
 def tmux(*args, stdin_text=None):
@@ -439,6 +442,9 @@ def _passthrough_args(args):
         val = getattr(args, flag.lstrip("-").replace("-", "_"))
         if val is not None:
             out += [flag, val]
+    for flag in BOOL_PASSTHROUGH_FLAGS:
+        if getattr(args, flag.lstrip("-").replace("-", "_")):
+            out += [flag]
     return out
 
 
@@ -750,6 +756,8 @@ def build_parser():
     ap.add_argument("-n", type=int, default=10, help="rows for --history")
     for flag in PASSTHROUGH_FLAGS:
         ap.add_argument(flag)
+    for flag in BOOL_PASSTHROUGH_FLAGS:
+        ap.add_argument(flag, action="store_true")
     # These claude flags only function under `claude -p`; clawp exits 2 on them.
     for flag in PRINT_ONLY_FLAGS:
         ap.add_argument(flag, dest="_unsupported_" + flag.lstrip("-"),

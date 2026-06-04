@@ -249,6 +249,18 @@ check("--tools empty-string is forwarded verbatim, not dropped like absent (None
           clawp.build_parser().parse_args(["--tools", "", "hi"]))
       == ["--tools", ""])
 
+# --disable-slash-commands ("Disable all skills") has no print-only note in
+# `claude --help`, so it's a session flag forwarded to the launch — but as a bare
+# flag (no value), clawp's first boolean passthrough.
+check("--disable-slash-commands parses as a boolean flag defaulting off",
+      clawp.build_parser().parse_args(["hi"]).disable_slash_commands is False)
+check("--disable-slash-commands is forwarded as a bare flag (no value)",
+      clawp._passthrough_args(
+          clawp.build_parser().parse_args(["--disable-slash-commands", "hi"]))
+      == ["--disable-slash-commands"])
+check("--disable-slash-commands absent is not forwarded",
+      clawp._passthrough_args(clawp.build_parser().parse_args(["hi"])) == [])
+
 # The idle backstop only decides a turn when no terminal transcript record
 # arrives; its stable window (STABLE_NEEDED * POLL) must outlast a natural
 # mid-turn streaming pause (~2.4s measured on 2.1.159) or it truncates early.
