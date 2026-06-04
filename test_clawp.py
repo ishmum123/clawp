@@ -159,6 +159,25 @@ check("final_answer returns last terminal assistant text",
 check("final_answer empty when no terminal record",
       clawp.final_answer([asst("tool_use", [TOOL_USE])]) == "")
 
+# turn_in_flight: log-primary guard that stops the screen backstop from settling
+# while the transcript shows Claude still owes a reply. The exact dead window that
+# returned exit 5: ...tool_use -> tool_result -> trailing noise, no answer record.
+NOISE_AFTER = [{"type": "ai-title"}, {"type": "last-prompt"},
+               {"type": "permission-mode"}]
+TOOL_RESULT = {"type": "user", "message": {"role": "user",
+               "content": [{"type": "tool_result", "content": "ok"}]}}
+check("in-flight while last real record is a tool_result (post-tool think phase)",
+      clawp.turn_in_flight([asst("tool_use", [TOOL_USE]), TOOL_RESULT] + NOISE_AFTER))
+check("in-flight while the assistant is still in tool_use",
+      clawp.turn_in_flight([asst("tool_use", [TOOL_USE])] + NOISE_AFTER))
+check("in-flight right after the echoed user prompt, before any reply",
+      clawp.turn_in_flight([{"type": "user",
+       "message": {"role": "user", "content": [txt("q")]}}]))
+check("NOT in-flight once a terminal assistant answer is the last real record",
+      not clawp.turn_in_flight(
+          [TOOL_RESULT, asst("end_turn", [txt("done")])] + NOISE_AFTER))
+check("NOT in-flight on an empty record slice", not clawp.turn_in_flight([]))
+
 # stream_event mapping
 check("stream_event skips noise", clawp.stream_event({"type": "system"}) is None)
 check("stream_event skips compaction",

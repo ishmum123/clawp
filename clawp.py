@@ -494,6 +494,25 @@ def _turn_events(answer, session_id, model, duration_ms, num_turns):
     ]
 
 
+def turn_in_flight(records):
+    # Log-primary completion guard: the transcript itself says the turn is not
+    # done when its last non-noise record is a user record (an echoed prompt or a
+    # tool_result — either way Claude still owes a reply) or an assistant still in
+    # continuation (tool_use / pause_turn). The screen backstop must not call a
+    # turn complete over a mid-flight log: after tool use Claude can think for
+    # 15-20s behind an idle-looking, spinner-less pane before the terminal answer
+    # record is written, and the screen alone can't tell that apart from done.
+    for rec in reversed(records):
+        if is_noise(rec):
+            continue
+        if rec.get("type") == "assistant":
+            return (rec.get("message") or {}).get("stop_reason") in CONTINUATION_STOP
+        if rec.get("type") == "user":
+            return True
+        return False
+    return False
+
+
 def _run_turn(name, session_id, path, prompt, fmt, stream):
     # One turn against an already-live pane: send the prompt, then watch the
     # transcript (primary) with a screen backstop until it settles. Returns
@@ -562,8 +581,12 @@ def _run_turn(name, session_id, path, prompt, fmt, stream):
         # idle backstop: quiet, idle, no spinner, no terminal record. Gate on
         # seen>offset (a record arrived this turn) so a warm pane's stale pre-send
         # screen — idle bar already present — can't settle into a false completion
-        # before the turn has produced anything.
-        if stable >= STABLE_NEEDED and has_idle_bar(screen) and seen > offset:
+        # before the turn has produced anything. And never settle while the
+        # transcript shows the turn is still mid-flight (turn_in_flight): after
+        # tool use Claude thinks for 15-20s behind an idle, spinner-less pane
+        # before the answer lands — the log, not the screen, is authoritative.
+        if (stable >= STABLE_NEEDED and has_idle_bar(screen) and seen > offset
+                and not turn_in_flight(records[offset:])):
             break
         time.sleep(POLL)
     else:
