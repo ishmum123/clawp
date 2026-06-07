@@ -54,6 +54,11 @@ MAX_TURN = 1800         # absolute per-turn cap (seconds)
 READY_TIMEOUT = 45      # seconds to reach the idle prompt after launch
 SEND_SETTLE = 0.8       # pause after send_text before polling for a reply
 PANE_W, PANE_H = 220, 50
+OUTPUT_TOKEN_FLOOR = 64000  # floor for the pane's CLAUDE_CODE_MAX_OUTPUT_TOKENS
+                           # (unless the caller already set one): the 32K
+                           # interactive default can be wholly spent on Opus
+                           # max-effort thinking before a large tool_use lands,
+                           # truncating the turn (max_tokens) before its file write.
 
 ASSIST_RE = re.compile(r"^⏺\s?")           # assistant message start (scrape fallback)
 PROMPT_RE = re.compile(r"^❯\s")            # input box / echoed prompt
@@ -164,6 +169,13 @@ def _accept_bypass_dialog(name):
     return False
 
 
+def _output_token_value():
+    # tmux new-session inherits the tmux SERVER's env, not clawp's, so a var set
+    # for clawp never reaches the pane unless forwarded with -e. Forward the
+    # caller's value when set; otherwise raise the pane to OUTPUT_TOKEN_FLOOR.
+    return os.environ.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS") or str(OUTPUT_TOKEN_FLOOR)
+
+
 def ensure_session(name, cwd, claude_args):
     """Launch the claude session if absent; clear launch dialogs; wait until idle.
 
@@ -174,7 +186,9 @@ def ensure_session(name, cwd, claude_args):
     """
     if has_session(name):
         return
-    tmux("new-session", "-d", "-s", name, "-x", str(PANE_W), "-y", str(PANE_H),
+    tmux("new-session", "-d", "-s", name,
+         "-e", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=" + _output_token_value(),
+         "-x", str(PANE_W), "-y", str(PANE_H),
          "-c", cwd, "claude", *claude_args)
     deadline = time.time() + READY_TIMEOUT
     trusted = False
@@ -325,6 +339,16 @@ def is_terminal_assistant(rec):
     if rec.get("type") != "assistant":
         return False
     return (rec.get("message") or {}).get("stop_reason") in TERMINAL_STOP
+
+
+def is_truncated(rec):
+    # max_tokens: claude hit the output-token cap and stopped mid-response (Claude
+    # Code does not auto-continue), so the turn is terminal but its answer — and any
+    # tool_use it was about to emit — is cut off. Flag it so a truncated turn is
+    # never logged (or returned) as a clean success.
+    if rec.get("type") != "assistant":
+        return False
+    return (rec.get("message") or {}).get("stop_reason") == "max_tokens"
 
 
 def assistant_text(rec):
@@ -547,6 +571,9 @@ def _run_turn(name, session_id, path, prompt, fmt, stream):
             seen += 1
             if is_terminal_assistant(rec):
                 answer = assistant_text(rec)
+                if is_truncated(rec):
+                    meta = _meta(True, False,
+                                 note="truncated at output-token cap (max_tokens)")
                 if stream:
                     ev = stream_event(rec)
                     if ev is not None:

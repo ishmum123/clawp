@@ -5,6 +5,7 @@ Run: python3 test_clawp.py
 """
 import io
 import json
+import os
 import sys
 
 import clawp
@@ -124,6 +125,23 @@ check("pause_turn is continuation", not clawp.is_terminal_assistant(asst("pause_
 check("null stop_reason is continuation", not clawp.is_terminal_assistant(asst(None, [txt("x")])))
 check("user record is not terminal assistant",
       not clawp.is_terminal_assistant({"type": "user", "message": {"role": "user"}}))
+
+# max_tokens is terminal (no auto-continue) but truncated: flagged, not clean.
+check("max_tokens is truncated", clawp.is_truncated(asst("max_tokens", [txt("x")])))
+check("end_turn is not truncated", not clawp.is_truncated(asst("end_turn", [txt("x")])))
+check("tool_use is not truncated", not clawp.is_truncated(asst("tool_use", [TOOL_USE])))
+check("user record is not truncated",
+      not clawp.is_truncated({"type": "user", "message": {"role": "user"}}))
+
+# output-token floor: forwarded to the pane via tmux -e (the pane can't inherit
+# clawp's env). Caller's value wins; otherwise the floor lifts the 32K default.
+os.environ.pop("CLAUDE_CODE_MAX_OUTPUT_TOKENS", None)
+check("output-token floor applied when env unset",
+      clawp._output_token_value() == str(clawp.OUTPUT_TOKEN_FLOOR))
+os.environ["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = "12345"
+check("output-token env respected when set",
+      clawp._output_token_value() == "12345")
+os.environ.pop("CLAUDE_CODE_MAX_OUTPUT_TOKENS", None)
 
 # noise / compaction skipping
 check("system record is noise", clawp.is_noise({"type": "system"}))

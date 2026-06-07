@@ -58,7 +58,8 @@ No build, lint, or package config. `test_clawp.py` is a plain script of `assert`
 
 - Standard library only — do not add third-party dependencies.
 - Keep it a single file; new logic goes in `clawp.py`.
-- Tuning constants live at the top of `clawp.py` (`POLL`, `STABLE_NEEDED`, `STALL_SECS`, `MAX_TURN`, `READY_TIMEOUT`, `SEND_SETTLE`, `PANE_W/H`). Adjust there, not inline.
+- Tuning constants live at the top of `clawp.py` (`POLL`, `STABLE_NEEDED`, `STALL_SECS`, `MAX_TURN`, `READY_TIMEOUT`, `SEND_SETTLE`, `PANE_W/H`, `OUTPUT_TOKEN_FLOOR`). Adjust there, not inline.
+- `OUTPUT_TOKEN_FLOOR` is forwarded to the pane as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` via `tmux new-session -e` (a pane inherits the tmux *server's* env, not clawp's, so an exported var would not otherwise reach it). The caller's value wins when set. Keep the floor at or below the smallest model's max output (64K for Sonnet/Haiku) so it can't be rejected; raising it avoids a turn truncating (`stop_reason: max_tokens`) before a large tool_use lands. A turn that still truncates is flagged `low_fidelity` (`is_truncated`), never returned as a clean success.
 - All jsonl-schema knowledge stays in the one localized transcript-parser section (between the `--- transcript parser ---` markers, beside `scrape_reply`). A claude format change is a one-place fix; depend on the minimum set of fields and ignore the rest.
 - When changing the `responses` schema, update the `CREATE TABLE` and the `INSERT` placeholder count together; if existing `clawp.sqlite` files must carry forward, add an `ALTER TABLE ... ADD COLUMN` migration in `init_db`.
 - Always insert into SQLite with parameterized queries.
