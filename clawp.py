@@ -7,25 +7,26 @@ Name: claw (claude wrapper) + p (the `claude -p` it drops in for).
 the prompt comes from a positional arg or stdin, the answer goes to stdout, and
 a clean run is silent on stderr (only errors/degraded turns are reported), with
 proper exit codes. The session-id is exposed via json/stream-json output and
-clawp.sqlite, not stderr. It runs the *interactive* `claude` TUI in a detached
-tmux pane (NEVER `claude -p`),
-so usage bills against your Claude subscription rather than the Agent SDK credit
-pool that `claude -p` draws from.
+clawp.sqlite, not stderr. It runs the *interactive* TUI in a detached tmux pane
+(NEVER `claude -p` / `kimi -p`),
+so usage bills against your subscription rather than the credit pool that the
+print modes draw from.
 
-How: generate (or resume) a session-id, launch `claude --session-id <uuid> ...`
-in an ephemeral pane, send the prompt verbatim, and capture the answer from the
-transcript jsonl claude writes to
-`~/.claude/projects/*/<session-id>.jsonl`. Completion is dual-signalled: a new
-assistant record with a terminal stop_reason, or a screen-idle backstop. The
+How: generate (or resume) a session-id, launch the chosen client
+(`claude --session-id <uuid> ...` or `kimi [--session <id>] ...`) in an
+ephemeral pane, send the prompt verbatim, and capture the answer from the
+transcript jsonl the client writes to disk. Completion is dual-signalled: a new
+transcript record with a terminal stop reason, or a screen-idle backstop. The
 pane is reaped on every exit path.
 
 Output modes (`--output-format`): text (default), json (one result object),
 stream-json (live NDJSON events). `--resume <id>` continues a prior session.
-`--full-auto` runs with bypassPermissions for unattended use.
+`--full-auto` runs with bypass/auto permissions for unattended use.
 
 Usage:
     clawp "your prompt"
     echo "prompt" | clawp
+    clawp --client kimi "your prompt"
     clawp --output-format json "..."
     clawp --output-format stream-json "..."
     clawp --resume <session-id> "..."
@@ -34,6 +35,7 @@ Usage:
 """
 import argparse
 import contextlib
+import dataclasses
 import datetime
 import fcntl
 import glob
@@ -71,10 +73,24 @@ DIALOG_MARKERS = (
     "trust this folder", "Quick safety check", "No, and tell Claude",
     "Bypass Permissions mode", "Yes, I accept",
 )
+# Kimi approval dialogs keep the idle status bar at the bottom, so they are
+# detected by their own prompt text rather than by the absence of the bar.
+KIMI_DIALOG_MARKERS = (
+    "Run this command?", "Allow this edit?", "Allow this Bash command?",
+    "Approve once", "Approve for this session", "Reject with feedback",
+    "↑/↓ select", "1/2/3/4 choose",
+)
 # Substrings that mark the idle interactive status bar. Its text varies by
 # version/plan — "Model: …" on 2.1.159, "shift+tab to cycle" / "◈ max ·
 # /effort" on 2.1.143 Claude Max — so any one of these means we reached the bar.
 IDLE_MARKERS = ("Model:", "shift+tab", "/effort")
+
+# Kimi-specific idle-bar/status substrings. The model version prefix changes
+# (K2.7 Code, K2.8 Code, ...), so the generic "Code thinking" marker catches
+# future releases while the specific one is kept for explicitness.
+KIMI_IDLE_MARKERS = ("K2.7 Code thinking", "Code thinking", "context:")
+KIMI_SESSION_RE = re.compile(r"Session:\s+(session_[a-f0-9-]+)")
+KIMI_VERSION_RE = re.compile(r"Version:\s+([\d.]+)")
 
 # A prompt whose first non-blank char is one of these can't be sent as a message:
 # the interactive TUI reads a leading '/' as a command (no reply — clawp would hang)
@@ -176,45 +192,402 @@ def _output_token_value():
     return os.environ.get("CLAUDE_CODE_MAX_OUTPUT_TOKENS") or str(OUTPUT_TOKEN_FLOOR)
 
 
-def ensure_session(name, cwd, claude_args):
-    """Launch the claude session if absent; clear launch dialogs; wait until idle.
+# --- client adapters ---------------------------------------------------------
 
-    claude_args is the full argv after `claude` (e.g. ["--session-id", uuid,
-    "--permission-mode", "acceptEdits"] or ["--resume", id, ...]). Two one-time
-    launch gates are cleared here: the trust-folder prompt, and — only when the
-    user asked for bypass mode — the Bypass-Permissions warning.
+@dataclasses.dataclass(frozen=True)
+class Client:
+    """Backend selector: one instance per supported client."""
+    name: str
+    command: str
+    env_token_var: str
+
+
+class ClaudeAdapter:
+    CLIENT = Client(name="claude", command="claude",
+                    env_token_var="CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+
+    @staticmethod
+    def launch_args(args, session_id, fresh):
+        return _launch_args(args, session_id, fresh)
+
+    @staticmethod
+    def find_transcript(session_id, cwd=None):
+        return find_transcript(session_id)
+
+    @staticmethod
+    def is_noise(rec):
+        return is_noise(rec)
+
+    @staticmethod
+    def is_terminal(rec):
+        return is_terminal_assistant(rec)
+
+    @staticmethod
+    def is_truncated(rec):
+        return is_truncated(rec)
+
+    @staticmethod
+    def answer_text(rec):
+        return assistant_text(rec)
+
+    @staticmethod
+    def final_answer(records):
+        return final_answer(records)
+
+    @staticmethod
+    def turn_in_flight(records):
+        return turn_in_flight(records)
+
+    @staticmethod
+    def stream_event(rec, records=None):
+        return stream_event(rec)
+
+    @staticmethod
+    def has_idle_bar(screen):
+        return has_idle_bar(screen)
+
+    @staticmethod
+    def looks_blocked(screen):
+        return looks_blocked(screen)
+
+    @staticmethod
+    def is_blocked(screen):
+        return looks_blocked(screen) and not has_idle_bar(screen)
+
+    @staticmethod
+    def has_spinner(screen):
+        return has_spinner(screen)
+
+    @staticmethod
+    def version(screen):
+        return claude_version(screen)
+
+
+# --- Kimi wire-format helpers ------------------------------------------------
+
+KIMI_NOISE_TYPES = {"metadata", "config.update", "tools.set_active_tools",
+                    "permission.set_mode", "usage.record", "context.append_message"}
+
+
+def _kimi_loop_event(rec):
+    if rec.get("type") == "context.append_loop_event":
+        return rec.get("event") or {}
+    return None
+
+
+def _kimi_step_uuid(rec):
+    ev = _kimi_loop_event(rec)
+    if ev and ev.get("type") == "step.end":
+        return ev.get("uuid")
+    return None
+
+
+def _kimi_step_content(step_uuid, records):
+    text_parts = []
+    tools = []
+    for rec in records:
+        ev = _kimi_loop_event(rec)
+        if not ev or ev.get("stepUuid") != step_uuid:
+            continue
+        et = ev.get("type")
+        if et == "content.part":
+            part = ev.get("part", {})
+            if part.get("type") == "text":
+                text_parts.append(part.get("text", ""))
+        elif et == "tool.call":
+            tools.append({"type": "tool_use", "name": ev.get("name", ""),
+                          "input": ev.get("args", {})})
+    return "".join(text_parts).strip(), tools
+
+
+def _kimi_read_index(index_path):
+    entries = []
+    if not os.path.exists(index_path):
+        return entries
+    with open(index_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries
+
+
+class KimiAdapter:
+    CLIENT = Client(name="kimi", command="kimi", env_token_var="")
+
+    @staticmethod
+    def launch_args(args, session_id, fresh):
+        # Kimi generates its own session IDs for fresh sessions.
+        if fresh and args.session_id:
+            raise CwError(2, "Kimi generates session IDs; do not use --session-id "
+                          "for a fresh session (use --resume <id> to continue)")
+        # Only --model is honored as a passthrough; everything else is claude-only.
+        rejected = []
+        for flag in PASSTHROUGH_FLAGS:
+            if flag == "--model":
+                continue
+            val = getattr(args, flag.lstrip("-").replace("-", "_"))
+            if val is not None:
+                rejected.append(flag)
+        for flag in BOOL_PASSTHROUGH_FLAGS:
+            if getattr(args, flag.lstrip("-").replace("-", "_")):
+                rejected.append(flag)
+        if rejected:
+            raise CwError(2, f"Kimi cannot honor {rejected[0]}; use Kimi-native "
+                          "flags instead")
+        out = []
+        if not fresh:
+            out += ["--session", session_id]
+        if args.full_auto:
+            out.append("--auto")
+        if args.model:
+            out += ["--model", args.model]
+        return out
+
+    @staticmethod
+    def find_transcript(session_id, cwd=None, index_path=None):
+        if index_path is None:
+            index_path = os.path.expanduser("~/.kimi-code/session_index.jsonl")
+        if not session_id:
+            return None
+        best = None
+        for entry in _kimi_read_index(index_path):
+            if entry.get("sessionId") == session_id:
+                if cwd is None or entry.get("workDir") == cwd:
+                    best = entry
+        if best:
+            return os.path.join(best["sessionDir"], "agents", "main", "wire.jsonl")
+        return None
+
+    @staticmethod
+    def find_latest_session(cwd, index_path=None):
+        if index_path is None:
+            index_path = os.path.expanduser("~/.kimi-code/session_index.jsonl")
+        if not cwd:
+            return None
+        for entry in reversed(_kimi_read_index(index_path)):
+            if entry.get("workDir") == cwd:
+                return entry
+        return None
+
+    @staticmethod
+    def is_noise(rec):
+        return rec.get("type") in KIMI_NOISE_TYPES
+
+    @staticmethod
+    def is_terminal(rec):
+        ev = _kimi_loop_event(rec)
+        return bool(ev and ev.get("type") == "step.end"
+                    and ev.get("finishReason") == "end_turn")
+
+    @staticmethod
+    def is_truncated(rec):
+        return False
+
+    @staticmethod
+    def answer_text(rec):
+        return ""
+
+    @staticmethod
+    def final_answer(records):
+        terminal_uuid = None
+        for rec in reversed(records):
+            ev = _kimi_loop_event(rec)
+            if ev and ev.get("type") == "step.end" \
+                    and ev.get("finishReason") == "end_turn":
+                terminal_uuid = ev.get("uuid")
+                break
+        if not terminal_uuid:
+            return ""
+        text, _ = _kimi_step_content(terminal_uuid, records)
+        return text
+
+    @staticmethod
+    def turn_in_flight(records):
+        for rec in reversed(records):
+            if KimiAdapter.is_noise(rec):
+                continue
+            if rec.get("type") == "turn.prompt":
+                return True
+            ev = _kimi_loop_event(rec)
+            if ev:
+                et = ev.get("type")
+                if et in ("step.begin", "content.part", "tool.call"):
+                    return True
+                if et == "tool.result":
+                    return True
+                if et == "step.end":
+                    return ev.get("finishReason") == "tool_use"
+            return False
+        return False
+
+    @staticmethod
+    def stream_event(rec, records=None):
+        if KimiAdapter.is_noise(rec):
+            return None
+        ev = _kimi_loop_event(rec)
+        if not ev:
+            return None
+        et = ev.get("type")
+        if et == "tool.result":
+            return {"type": "tool_result"}
+        if et != "step.end" or not records:
+            return None
+        finish = ev.get("finishReason")
+        if finish not in ("end_turn", "tool_use"):
+            return None
+        step_uuid = ev.get("uuid")
+        text, tools = _kimi_step_content(step_uuid, records)
+        if tools:
+            content = ([{"type": "text", "text": text}] if text else []) + tools
+            return {"type": "assistant", "message": {"content": content}}
+        if text:
+            return {"type": "assistant", "text": text}
+        return None
+
+    @staticmethod
+    def has_idle_bar(screen):
+        return any(m in screen for m in KIMI_IDLE_MARKERS)
+
+    @staticmethod
+    def looks_blocked(screen):
+        return any(m in screen for m in KIMI_DIALOG_MARKERS)
+
+    @staticmethod
+    def is_blocked(screen):
+        # Kimi shows approval prompts inline while the idle bar stays visible,
+        # so block detection keys on dialog text rather than bar absence.
+        return KimiAdapter.looks_blocked(screen)
+
+    @staticmethod
+    def has_spinner(screen):
+        # Kimi's idle bar truncates the cwd with "…" (e.g. "…/Programming/…"),
+        # which would false-positive the generic ellipsis spinner test. Only
+        # count an ellipsis as a spinner if it is NOT on the idle-bar line.
+        return any("…" in l and "│" not in l
+                   and not any(m in l for m in KIMI_IDLE_MARKERS)
+                   for l in bottom_lines(screen))
+
+    @staticmethod
+    def version(screen):
+        m = KIMI_VERSION_RE.search(screen)
+        return m.group(1) if m else ""
+
+
+def get_client(name):
+    if name == "kimi":
+        return KimiAdapter
+    if name == "claude":
+        return ClaudeAdapter
+    raise CwError(2, f"unknown client {name!r}; choose 'claude' or 'kimi'")
+
+
+# --- end client adapters -----------------------------------------------------
+
+
+def ensure_session(name, cwd, client, launch_args, session_id=None):
+    """Launch the client session if absent; clear launch dialogs; wait until idle.
+
+    Returns (session_id, transcript_path_hint). For Claude the hint is None and
+    the caller resolves the path later via find_transcript. For Kimi the hint is
+    discovered from the session index (Kimi generates its own IDs and stores the
+    transcript under a workdir-keyed directory).
     """
     if has_session(name):
-        return
-    tmux("new-session", "-d", "-s", name,
-         "-e", "CLAUDE_CODE_MAX_OUTPUT_TOKENS=" + _output_token_value(),
+        if client.CLIENT.name == "kimi" and session_id:
+            path = client.find_transcript(session_id, cwd)
+            return session_id, path
+        return session_id, None
+
+    env_args = []
+    if client.CLIENT.env_token_var:
+        env_args = ["-e", client.CLIENT.env_token_var + "=" + _output_token_value()]
+    tmux("new-session", "-d", "-s", name, *env_args,
          "-x", str(PANE_W), "-y", str(PANE_H),
-         "-c", cwd, "claude", *claude_args)
+         "-c", cwd, client.CLIENT.command, *launch_args)
     deadline = time.time() + READY_TIMEOUT
-    trusted = False
-    bypassed = False
+
+    if client.CLIENT.name == "claude":
+        trusted = False
+        bypassed = False
+        while time.time() < deadline:
+            screen = capture(name)
+            if not trusted and ("trust this folder" in screen
+                                or "Quick safety check" in screen):
+                tmux("send-keys", "-t", name, "Enter")   # default = "Yes, I trust"
+                trusted = True
+                time.sleep(1.0)
+                continue
+            # First bypass launch on an unaccepted box warns before the prompt. The
+            # user explicitly chose --full-auto, so accept it — one shot, so a missed
+            # keystroke can't loop the highlight back onto the default "No, exit".
+            if (not bypassed and "bypassPermissions" in launch_args
+                    and "Yes, I accept" in screen):
+                bypassed = True
+                _accept_bypass_dialog(name)
+                time.sleep(1.0)
+                continue
+            if client.has_idle_bar(screen) and not client.has_spinner(screen):
+                return session_id, None
+            time.sleep(POLL)
+        raise TimeoutError(f"claude session '{name}' did not become ready in "
+                           f"{READY_TIMEOUT}s")
+
+    # Kimi: for a resume the session-id is known; just wait for idle and resolve
+    # the transcript path. For a fresh session, discover the generated ID from the
+    # welcome screen or the newest index entry for this cwd that did not exist
+    # before launch (so a stale prior session is never mistaken for the new one).
+    if session_id:
+        path = client.find_transcript(session_id, cwd)
+        while time.time() < deadline:
+            screen = capture(name)
+            if client.has_idle_bar(screen) and not client.looks_blocked(screen) \
+                    and not client.has_spinner(screen):
+                return session_id, path
+            time.sleep(POLL)
+        raise TimeoutError(f"kimi session '{name}' did not become ready in "
+                           f"{READY_TIMEOUT}s")
+
+    known_ids = {e.get("sessionId") for e in _kimi_read_index(
+        os.path.expanduser("~/.kimi-code/session_index.jsonl"))}
+
+    def _new_session_entry():
+        for entry in reversed(_kimi_read_index(
+                os.path.expanduser("~/.kimi-code/session_index.jsonl"))):
+            if entry.get("workDir") == cwd \
+                    and entry.get("sessionId") not in known_ids:
+                return entry
+        return None
+
+    discovered = None
+    path = None
     while time.time() < deadline:
         screen = capture(name)
-        if not trusted and ("trust this folder" in screen
-                            or "Quick safety check" in screen):
-            tmux("send-keys", "-t", name, "Enter")   # default = "Yes, I trust"
-            trusted = True
-            time.sleep(1.0)
-            continue
-        # First bypass launch on an unaccepted box warns before the prompt. The
-        # user explicitly chose --full-auto, so accept it — one shot, so a missed
-        # keystroke can't loop the highlight back onto the default "No, exit".
-        if (not bypassed and "bypassPermissions" in claude_args
-                and "Yes, I accept" in screen):
-            bypassed = True
-            _accept_bypass_dialog(name)
-            time.sleep(1.0)
-            continue
-        if at_idle_prompt(screen) and not has_spinner(screen):
-            return
+        m = KIMI_SESSION_RE.search(screen)
+        if m:
+            candidate = m.group(1)
+            if candidate not in known_ids:
+                discovered = candidate
+                break
+        entry = _new_session_entry()
+        if entry:
+            discovered = entry["sessionId"]
+            break
+        if client.has_idle_bar(screen) and not client.looks_blocked(screen):
+            entry = _new_session_entry()
+            if entry:
+                discovered = entry["sessionId"]
+                break
         time.sleep(POLL)
-    raise TimeoutError(f"claude session '{name}' did not become ready in "
-                       f"{READY_TIMEOUT}s")
+    if not discovered:
+        raise TimeoutError(f"kimi session '{name}' did not become ready in "
+                           f"{READY_TIMEOUT}s")
+    path = client.find_transcript(discovered, cwd)
+    return discovered, path
 
 
 def clear_input(name):
@@ -537,14 +910,14 @@ def turn_in_flight(records):
     return False
 
 
-def _run_turn(name, session_id, path, prompt, fmt, stream):
+def _run_turn(name, session_id, path, prompt, fmt, stream, client, cwd):
     # One turn against an already-live pane: send the prompt, then watch the
     # transcript (primary) with a screen backstop until it settles. Returns
     # (answer, meta, path); emits clawp's per-record events when stream=True. Raises
     # CwError (meta attached for the caller's log) on a blocked/stalled/over-long
     # turn. Caller owns the lock, ensure_session, logging, and pane teardown.
     if path is None:
-        path = find_transcript(session_id)
+        path = client.find_transcript(session_id, cwd)
     # Offset (record count) at send time swallows the previous turn's trailing
     # system/summary records; file may not exist yet on a fresh session (offset 0).
     offset = len(read_records(path))
@@ -561,7 +934,7 @@ def _run_turn(name, session_id, path, prompt, fmt, stream):
     seen = offset
     while time.time() - start < MAX_TURN:
         if path is None:
-            path = find_transcript(session_id)
+            path = client.find_transcript(session_id, cwd)
         records = read_records(path)
         new = records[seen:]
         # Stop AT the terminal record: a record flushed after end_turn in the same
@@ -569,19 +942,19 @@ def _run_turn(name, session_id, path, prompt, fmt, stream):
         done = False
         for rec in new:
             seen += 1
-            if is_terminal_assistant(rec):
-                answer = assistant_text(rec)
-                if is_truncated(rec):
+            if client.is_terminal(rec):
+                answer = client.final_answer(records[offset:seen])
+                if client.is_truncated(rec):
                     meta = _meta(True, False,
                                  note="truncated at output-token cap (max_tokens)")
                 if stream:
-                    ev = stream_event(rec)
+                    ev = client.stream_event(rec, records=records[offset:seen])
                     if ev is not None:
                         print(json.dumps(ev), flush=True)
                 done = True
                 break
             if stream:
-                ev = stream_event(rec)
+                ev = client.stream_event(rec, records=records[offset:seen])
                 if ev is not None:
                     print(json.dumps(ev), flush=True)
         if done:
@@ -595,14 +968,14 @@ def _run_turn(name, session_id, path, prompt, fmt, stream):
             stable = 1
             last_screen = screen
             last_change = now
-        if turn_blocked(screen):
+        if client.is_blocked(screen):
             raise CwError(3, "blocked: permission/trust dialog (use --full-auto "
                           "for unattended runs)",
                           meta=_meta(False, False, blocked=True, note="blocked"))
         if now - last_change >= STALL_SECS:
             raise CwError(4, "stall: screen frozen, no terminal stop_reason",
                           meta=_meta(False, True, note="stalled"))
-        if has_spinner(screen):
+        if client.has_spinner(screen):
             time.sleep(POLL)
             continue
         # idle backstop: quiet, idle, no spinner, no terminal record. Gate on
@@ -610,10 +983,10 @@ def _run_turn(name, session_id, path, prompt, fmt, stream):
         # screen — idle bar already present — can't settle into a false completion
         # before the turn has produced anything. And never settle while the
         # transcript shows the turn is still mid-flight (turn_in_flight): after
-        # tool use Claude thinks for 15-20s behind an idle, spinner-less pane
+        # tool use the client thinks for 15-20s behind an idle, spinner-less pane
         # before the answer lands — the log, not the screen, is authoritative.
-        if (stable >= STABLE_NEEDED and has_idle_bar(screen) and seen > offset
-                and not turn_in_flight(records[offset:])):
+        if (stable >= STABLE_NEEDED and client.has_idle_bar(screen) and seen > offset
+                and not client.turn_in_flight(records[offset:])):
             break
         time.sleep(POLL)
     else:
@@ -623,10 +996,10 @@ def _run_turn(name, session_id, path, prompt, fmt, stream):
     # Schema-break fallback: settled but parsed no usable answer. Slice by offset so
     # a resumed/multi-turn transcript can't return a PRIOR turn's answer.
     if not answer:
-        answer = final_answer(read_records(path)[offset:])
+        answer = client.final_answer(read_records(path)[offset:])
     if not answer:
-        ver = claude_version(capture(name))
-        vsfx = f" on Claude Code v{ver}" if ver else ""
+        ver = client.version(capture(name))
+        vsfx = f" on {client.CLIENT.name} v{ver}" if ver else ""
         if fmt == "text":
             answer = scrape_reply(capture(name))
             meta = _meta(True, False, note="schema unrecognized" + vsfx)
@@ -638,11 +1011,38 @@ def _run_turn(name, session_id, path, prompt, fmt, stream):
     return answer, meta, path
 
 
-def run_print_turn(args, cwd, db_path):
+def _build_session(args, client):
+    """Return (session_id, launch_args) for ensure_session.
+
+    Claude pre-assigns a UUID; Kimi generates its own ID and is discovered later.
+    """
     fresh = args.resume is None
-    session_id = args.session_id or args.resume or str(uuid.uuid4())
-    name = "clawp-" + session_id[:8]
-    claude_args = _launch_args(args, session_id, fresh)
+    if client.CLIENT.name == "claude":
+        session_id = args.session_id or args.resume or str(uuid.uuid4())
+        return session_id, client.launch_args(args, session_id, fresh)
+    # Kimi
+    if fresh:
+        if args.session_id:
+            raise CwError(2, "Kimi generates session IDs; do not use --session-id "
+                          "for a fresh session (use --resume <id> to continue)")
+        return None, client.launch_args(args, None, fresh)
+    return args.resume, client.launch_args(args, args.resume, fresh)
+
+
+def _pane_name(client, session_id):
+    # Serialize concurrent turns per session-id. Claude always knows its id up
+    # front; Kimi only knows it for resumes, so fresh Kimi sessions use a random
+    # pane name (they are independent new sessions anyway).
+    if client.CLIENT.name == "claude":
+        return "clawp-" + session_id[:8]
+    if session_id:
+        return "clawp-kimi-" + session_id[-8:]
+    return "clawp-kimi-" + uuid.uuid4().hex[:8]
+
+
+def run_print_turn(args, cwd, db_path):
+    client = get_client(args.client)
+    session_id, launch_args = _build_session(args, client)
 
     fmt = args.output_format
     stream = fmt == "stream-json"
@@ -652,15 +1052,17 @@ def run_print_turn(args, cwd, db_path):
     answer = None
     meta = _meta(False, False)
     seconds = 0.0
+    name = _pane_name(client, session_id)
     with session_lock(name):
         try:
             try:
-                ensure_session(name, cwd, claude_args)
+                session_id, path_hint = ensure_session(name, cwd, client,
+                                                       launch_args, session_id)
             except TimeoutError as e:
                 raise CwError(5, str(e), meta=_meta(False, True, note="launch failed"))
-            path = find_transcript(session_id)
+            path = path_hint or client.find_transcript(session_id, cwd)
             answer, meta, path = _run_turn(name, session_id, path, args.prompt,
-                                           fmt, stream)
+                                           fmt, stream, client, cwd)
         except CwError as e:
             if e.meta is not None:
                 meta = e.meta
@@ -693,20 +1095,20 @@ def run_stream_turns(args, cwd, db_path):
     # run each against the live pane, emit claude-shaped stream-json, and reap the
     # pane when stdin closes (EOF = conversation over). A blocked/stalled turn ends
     # the session: the dialog owns the pane and clawp can't answer it.
-    fresh = args.resume is None
-    session_id = args.session_id or args.resume or str(uuid.uuid4())
-    name = "clawp-" + session_id[:8]
-    claude_args = _launch_args(args, session_id, fresh)
+    client = get_client(args.client)
+    session_id, launch_args = _build_session(args, client)
     model = args.model or "default"
     turns = 0
+    name = _pane_name(client, session_id)
     with session_lock(name):
         try:
             try:
-                ensure_session(name, cwd, claude_args)
+                session_id, path_hint = ensure_session(name, cwd, client,
+                                                       launch_args, session_id)
             except TimeoutError as e:
                 raise CwError(5, str(e))
             print(json.dumps(_init_event(session_id, model, cwd)), flush=True)
-            path = find_transcript(session_id)
+            path = path_hint or client.find_transcript(session_id, cwd)
             # readline (not `for line in sys.stdin`) so each turn is processed as
             # soon as the caller writes it — iterator read-ahead would buffer it.
             for line in iter(sys.stdin.readline, ""):
@@ -731,7 +1133,7 @@ def run_stream_turns(args, cwd, db_path):
                 answer, meta = None, _meta(False, False)
                 try:
                     answer, meta, path = _run_turn(name, session_id, path, prompt,
-                                                   "stream-json", False)
+                                                   "stream-json", False, client, cwd)
                     ms = int((time.time() - t0) * 1000)
                     for ev in _turn_events(answer, session_id, model, ms, turns):
                         print(json.dumps(ev), flush=True)
@@ -774,6 +1176,8 @@ def build_parser():
     ap.add_argument("prompt", nargs="?")
     ap.add_argument("-p", "--print", action="store_true",
                     help="accepted no-op (clawp is always print)")
+    ap.add_argument("--client", choices=("claude", "kimi"), default="claude",
+                    help="backend client to drive (default: claude)")
     # Accepted-but-ignored `claude -p` flags, for drop-in argv compatibility.
     # --no-session-persistence must NOT be forwarded: it suppresses the
     # transcript jsonl that clawp reads the answer back from.
@@ -796,7 +1200,7 @@ def build_parser():
     ap.add_argument("--resume")
     ap.add_argument("--session-id")
     ap.add_argument("--full-auto", action="store_true",
-                    help="bypassPermissions (default acceptEdits)")
+                    help="bypassPermissions/auto mode (default acceptEdits)")
     # No -c alias: -c/--continue is out of scope, so it must not silently bind
     # to --cwd. --cwd stays long-form only.
     ap.add_argument("--cwd", default=os.getcwd())

@@ -489,4 +489,210 @@ check("--max-budget-usd exits 2 with clawp's curated reject",
       _flag_check_code(["--max-budget-usd", "5", "hi"]) == 2)
 
 
+# --- Kimi adapter ------------------------------------------------------------
+
+check("default client is claude",
+      clawp.build_parser().parse_args(["hi"]).client == "claude")
+check("--client kimi parses",
+      clawp.build_parser().parse_args(["--client", "kimi", "hi"]).client == "kimi")
+
+KIMI = clawp.KimiAdapter
+
+def kpart(step, typ, value):
+    return {"type": "context.append_loop_event",
+            "event": {"type": "content.part", "stepUuid": step,
+                      "part": {"type": typ, typ: value}}}
+
+def kbegin(step):
+    return {"type": "context.append_loop_event",
+            "event": {"type": "step.begin", "uuid": step}}
+
+def kend(step, finish):
+    return {"type": "context.append_loop_event",
+            "event": {"type": "step.end", "uuid": step,
+                      "finishReason": finish}}
+
+def ktool(step, name, args):
+    return {"type": "context.append_loop_event",
+            "event": {"type": "tool.call", "stepUuid": step,
+                      "name": name, "args": args}}
+
+def kresult(parent):
+    return {"type": "context.append_loop_event",
+            "event": {"type": "tool.result", "parentUuid": parent,
+                      "toolCallId": parent,
+                      "result": {"output": "ok"}}}
+
+def kprompt(text):
+    return {"type": "turn.prompt", "input": [{"type": "text", "text": text}]}
+
+STEP1 = "step-1-uuid"
+STEP2 = "step-2-uuid"
+TOOL1 = "tool-1-uuid"
+
+# noise classification
+check("kimi metadata is noise", KIMI.is_noise({"type": "metadata"}))
+check("kimi config.update is noise", KIMI.is_noise({"type": "config.update"}))
+check("kimi usage.record is noise", KIMI.is_noise({"type": "usage.record"}))
+check("kimi turn.prompt is not noise", not KIMI.is_noise(kprompt("hi")))
+check("kimi content.part is not noise", not KIMI.is_noise(kpart(STEP1, "text", "hi")))
+
+# terminal detection
+check("kimi step.end end_turn is terminal",
+      KIMI.is_terminal(kend(STEP1, "end_turn")))
+check("kimi step.end tool_use is not terminal",
+      not KIMI.is_terminal(kend(STEP1, "tool_use")))
+check("kimi step.end other is not terminal",
+      not KIMI.is_terminal(kend(STEP1, "stop")))
+check("kimi content.part is not terminal",
+      not KIMI.is_terminal(kpart(STEP1, "text", "hi")))
+
+# final answer extraction
+check("kimi final_answer joins text parts from terminal step",
+      KIMI.final_answer([
+          kbegin(STEP1),
+          kpart(STEP1, "think", "ignore me"),
+          kpart(STEP1, "text", "hello "),
+          kpart(STEP1, "text", "world"),
+          kend(STEP1, "end_turn"),
+      ]) == "hello world")
+check("kimi final_answer ignores text from earlier steps",
+      KIMI.final_answer([
+          kbegin(STEP1), kpart(STEP1, "text", "old "), kend(STEP1, "tool_use"),
+          ktool(STEP1, "Bash", {"command": "echo ok"}),
+          kresult(TOOL1),
+          kbegin(STEP2), kpart(STEP2, "text", "new"), kend(STEP2, "end_turn"),
+      ]) == "new")
+check("kimi final_answer empty without terminal step",
+      KIMI.final_answer([kbegin(STEP1), kpart(STEP1, "text", "x")]) == "")
+
+# turn_in_flight across tool-use continuations
+check("kimi in-flight after prompt", KIMI.turn_in_flight([kprompt("hi")]))
+check("kimi in-flight during content.part",
+      KIMI.turn_in_flight([kpart(STEP1, "text", "x")]))
+check("kimi in-flight during tool.call",
+      KIMI.turn_in_flight([ktool(STEP1, "Bash", {})]))
+check("kimi in-flight after tool_use step end (post-tool think phase)",
+      KIMI.turn_in_flight([
+          ktool(STEP1, "Bash", {}), kend(STEP1, "tool_use"), kresult(TOOL1)]))
+check("kimi NOT in-flight once end_turn arrives",
+      not KIMI.turn_in_flight([
+          kbegin(STEP1), kpart(STEP1, "text", "done"), kend(STEP1, "end_turn")]))
+
+# stream_event mapping (one assistant event per step)
+check("kimi stream_event emits assistant text at end_turn",
+      KIMI.stream_event(kend(STEP1, "end_turn"), records=[
+          kbegin(STEP1), kpart(STEP1, "text", "hi")]) ==
+      {"type": "assistant", "text": "hi"})
+check("kimi stream_event emits assistant/message for tool_use step",
+      KIMI.stream_event(kend(STEP1, "tool_use"), records=[
+          kbegin(STEP1), kpart(STEP1, "text", "Let me check."),
+          ktool(STEP1, "Bash", {"command": "ls"})]) ==
+      {"type": "assistant", "message": {"content": [
+          {"type": "text", "text": "Let me check."},
+          {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}]}})
+check("kimi stream_event emits tool_result",
+      KIMI.stream_event(kresult(TOOL1)) == {"type": "tool_result"})
+check("kimi stream_event skips think parts",
+      KIMI.stream_event(kpart(STEP1, "think", "reason")) is None)
+check("kimi stream_event skips noise",
+      KIMI.stream_event({"type": "usage.record"}) is None)
+
+# transcript discovery via mocked session_index.jsonl
+import tempfile
+with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+    f.write(json.dumps({"sessionId": "session_other",
+                        "sessionDir": "/x/s_other", "workDir": "/other"}) + "\n")
+    f.write(json.dumps({"sessionId": "session_abc",
+                        "sessionDir": "/x/s_abc", "workDir": "/proj"}) + "\n")
+    MOCK_INDEX = f.name
+
+check("kimi find_transcript maps sessionId to wire.jsonl",
+      KIMI.find_transcript("session_abc", cwd="/proj",
+                           index_path=MOCK_INDEX) ==
+      "/x/s_abc/agents/main/wire.jsonl")
+check("kimi find_transcript respects cwd",
+      KIMI.find_transcript("session_abc", cwd="/other",
+                           index_path=MOCK_INDEX) is None)
+check("kimi find_transcript returns None for unknown session",
+      KIMI.find_transcript("session_missing", cwd="/proj",
+                           index_path=MOCK_INDEX) is None)
+check("kimi find_latest_session returns last matching cwd entry",
+      KIMI.find_latest_session(cwd="/proj", index_path=MOCK_INDEX)["sessionId"] ==
+      "session_abc")
+check("kimi find_latest_session returns None for missing cwd",
+      KIMI.find_latest_session(cwd="/nowhere", index_path=MOCK_INDEX) is None)
+os.unlink(MOCK_INDEX)
+
+# launch args
+def _kimi_launch(argv):
+    return KIMI.launch_args(clawp.build_parser().parse_args(argv), None, True)
+
+def _kimi_check_code(argv):
+    real = sys.stderr
+    sys.stderr = io.StringIO()
+    try:
+        KIMI.launch_args(clawp.build_parser().parse_args(argv), None, True)
+        return None
+    except clawp.CwError as e:
+        return e.code
+    finally:
+        sys.stderr = real
+
+check("kimi --full-auto maps to --auto",
+      _kimi_launch(["--full-auto", "hi"]) == ["--auto"])
+check("kimi --model maps to --model <alias>",
+      _kimi_launch(["--model", "k2.7", "hi"]) == ["--model", "k2.7"])
+check("kimi fresh rejects --session-id",
+      _kimi_check_code(["--client", "kimi", "--session-id", "x", "hi"]) == 2)
+check("kimi rejects claude-only --effort",
+      _kimi_check_code(["--client", "kimi", "--effort", "high", "hi"]) == 2)
+check("kimi resume uses --session <id>",
+      KIMI.launch_args(clawp.build_parser().parse_args(
+          ["--client", "kimi", "--resume", "session_abc", "hi"]),
+          "session_abc", False) == ["--session", "session_abc"])
+
+# screen markers
+check("kimi has_idle_bar detects context: status",
+      KIMI.has_idle_bar("some text\n  context: /auto · /yolo"))
+check("kimi has_idle_bar detects K2.7 Code thinking",
+      KIMI.has_idle_bar("  K2.7 Code thinking · context:"))
+check("kimi looks_blocked detects Run this command?",
+      KIMI.looks_blocked("▶ Run this command?\n  1. Approve once"))
+check("kimi is_blocked true even when idle bar still visible",
+      KIMI.is_blocked(
+          "K2.7 Code thinking  …/project\n▶ Run this command?\n  context:"))
+check("kimi not blocked on normal answer",
+      not KIMI.is_blocked("K2.7 Code thinking  …/project\n  context:"))
+check("kimi version scraped from welcome banner",
+      KIMI.version("  Version: 0.15.0\n") == "0.15.0")
+check("kimi session id scraped from welcome banner",
+      clawp.KIMI_SESSION_RE.search(
+          "  Session: session_a1b2c3d4-e5f6-7890-abcd-ef1234567890\n").group(1) ==
+      "session_a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+
+# Kimi's idle bar truncates the cwd with an ellipsis; the generic spinner test
+# must not false-positive on it.
+KIMI_IDLE_WITH_PATH = (
+    "  K2.7 Code thinking  …/Programming/Voluntary/clawp  main\n"
+    "  context: 0.0% (0/262.1k)\n"
+)
+check("kimi idle-bar path ellipsis is not a spinner",
+      not KIMI.has_spinner(KIMI_IDLE_WITH_PATH))
+check("kimi real spinner still detected",
+      KIMI.has_spinner("  ✳ Imagining… (3s)\n" + KIMI_IDLE_WITH_PATH))
+
+# unknown client
+_real = sys.stderr
+try:
+    sys.stderr = io.StringIO()
+    clawp.get_client("unknown")
+    ok = False
+except clawp.CwError as e:
+    ok = e.code == 2
+finally:
+    sys.stderr = _real
+check("unknown client raises exit 2", ok)
+
+
 print("\nall passed")
