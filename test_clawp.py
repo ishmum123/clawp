@@ -652,6 +652,35 @@ check("kimi resume uses --session <id>",
           ["--client", "kimi", "--resume", "session_abc", "hi"]),
           "session_abc", False) == ["--session", "session_abc"])
 
+# Kimi-native flags
+_check_default = clawp.build_parser().parse_args(["hi"])
+check("kimi --yolo default off", _check_default.yolo is False)
+check("kimi --plan default off", _check_default.plan is False)
+check("kimi --skills-dir default None", _check_default.skills_dir is None)
+check("kimi --yolo forwarded",
+      _kimi_launch(["--yolo", "hi"]) == ["--yolo"])
+check("kimi --plan forwarded",
+      _kimi_launch(["--plan", "hi"]) == ["--plan"])
+check("kimi --skills-dir forwarded",
+      _kimi_launch(["--skills-dir", "/tmp/skills", "hi"])
+      == ["--skills-dir", "/tmp/skills"])
+check("kimi repeated --skills-dir forwarded",
+      _kimi_launch(["--skills-dir", "/a", "--skills-dir", "/b", "hi"])
+      == ["--skills-dir", "/a", "--skills-dir", "/b"])
+check("kimi combo forwarded",
+      _kimi_launch(["--full-auto", "--yolo", "--plan",
+                    "--model", "k2.7", "--skills-dir", "/s", "hi"])
+      == ["--auto", "--model", "k2.7", "--yolo", "--plan",
+          "--skills-dir", "/s"])
+
+# Kimi-native flags rejected for claude
+check("claude --yolo rejected",
+      _flag_check_code(["--client", "claude", "--yolo", "hi"]) == 2)
+check("claude --plan rejected",
+      _flag_check_code(["--client", "claude", "--plan", "hi"]) == 2)
+check("claude --skills-dir rejected",
+      _flag_check_code(["--client", "claude", "--skills-dir", "/s", "hi"]) == 2)
+
 # screen markers
 check("kimi has_idle_bar detects context: status",
       KIMI.has_idle_bar("some text\n  context: /auto · /yolo"))

@@ -41,7 +41,7 @@ Key differences from the Claude path:
 
 - **Session ID discovery:** Kimi generates its own session IDs. For a fresh session, `ensure_session` scrapes `Session: session_<uuid>` from the welcome screen and falls back to reading `~/.kimi-code/session_index.jsonl` for the most recent entry matching `--cwd`.
 - **Resume:** `--resume <session-id>` launches `kimi --session <id>`.
-- **Launch flags:** `--full-auto` maps to Kimi `--auto`; `--model` maps to `--model <alias>`; `--session-id` is rejected for fresh Kimi sessions; all other Claude-only passthrough flags (`--effort`, `--add-dir`, `--system-prompt`, etc.) exit 2.
+- **Launch flags:** `--full-auto` maps to Kimi `--auto`; `--model` maps to `--model <alias>`; `--yolo`, `--plan`, and `--skills-dir` are forwarded verbatim (Kimi-native flags, rejected for `--client claude`); `--session-id` is rejected for fresh Kimi sessions; all other Claude-only passthrough flags (`--effort`, `--add-dir`, `--system-prompt`, etc.) exit 2.
 - **Wire parser:** Kimi events are `context.append_loop_event` records carrying `step.begin`, `content.part` (`text`/`think`), `tool.call`, `tool.result`, and `step.end` (`finishReason`). The terminal answer is the joined text parts from the last step whose `finishReason == "end_turn"`. Tool-use continuations (`finishReason == "tool_use"`) keep `turn_in_flight` true until the following `step.end`.
 - **Screen markers:** Kimi's idle bar carries `K2.7 Code thinking` and/or `context:`. Approval prompts (e.g. "Run this command?") keep the idle bar visible, so Kimi block detection keys on the prompt text rather than on the bar disappearing.
 - **Output shape:** Public text/json/stream-json output stays claude-shaped so existing consumers keep working.
@@ -63,6 +63,8 @@ python3 clawp.py --history -n 20   # view recent logged turns
 # Kimi backend
 python3 clawp.py --client kimi "prompt"
 python3 clawp.py --client kimi --resume session_<uuid> "and more"
+python3 clawp.py --client kimi --yolo --plan "refactor calc.py"
+python3 clawp.py --client kimi --skills-dir ./my-skills "use my tools"
 # streaming multi-turn: NDJSON user turns on stdin, one warm pane, claude-shaped events
 python3 clawp.py --input-format stream-json --output-format stream-json
 python3 clawp.py --client kimi --input-format stream-json --output-format stream-json
@@ -72,7 +74,7 @@ No build, lint, or package config. `test_clawp.py` is a plain script of `assert`
 
 ## CLI surface
 
-`clawp [flags] [prompt]`, mirroring `claude [options] [prompt]`. No subcommands. Prompt from positional arg else stdin; both empty → exit 2. Only `--history` is clawp's own (log viewer). `-p`/`--print` is an accepted no-op synonym. `--client {claude,kimi}` selects the backend (default `claude`). `--input-format stream-json` enables streaming-input mode (see below). `--include-partial-messages` is a no-op under `--output-format stream-json` (clawp reads completed transcript records, so it can't emit token-level partials, but the envelope's whole-answer delta is valid stream-json) and exits 2 for text/json — mirroring claude's "only works with stream-json" rule. The remaining print-only flags (`--max-turns`, `--max-budget-usd`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) exit 2; session flags (`--model`, `--add-dir`, etc.) pass through to the launch, including boolean ones like `--disable-slash-commands` (forwarded as a bare flag). When `--client kimi` is used, only `--model` and `--full-auto` are honored as passthroughs; other session flags exit 2.
+`clawp [flags] [prompt]`, mirroring `claude [options] [prompt]`. No subcommands. Prompt from positional arg else stdin; both empty → exit 2. Only `--history` is clawp's own (log viewer). `-p`/`--print` is an accepted no-op synonym. `--client {claude,kimi}` selects the backend (default `claude`). `--input-format stream-json` enables streaming-input mode (see below). `--include-partial-messages` is a no-op under `--output-format stream-json` (clawp reads completed transcript records, so it can't emit token-level partials, but the envelope's whole-answer delta is valid stream-json) and exits 2 for text/json — mirroring claude's "only works with stream-json" rule. The remaining print-only flags (`--max-turns`, `--max-budget-usd`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) exit 2; session flags (`--model`, `--add-dir`, etc.) pass through to the launch, including boolean ones like `--disable-slash-commands` (forwarded as a bare flag). When `--client kimi` is used, only `--model`, `--full-auto` (mapped to `--auto`), and the Kimi-native `--yolo`, `--plan`, and `--skills-dir` flags are honored; other Claude-only passthrough flags are rejected with exit 2.
 
 ## Conventions
 

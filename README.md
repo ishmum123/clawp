@@ -43,6 +43,8 @@ clawp --client kimi "summarize the difference between TCP and UDP"
 clawp --client kimi --resume session_<uuid> "and now in Python"
 clawp --client kimi --model kimi-code/kimi-for-coding "…"
 clawp --client kimi --full-auto "add type hints to calc.py"
+clawp --client kimi --yolo --plan "refactor calc.py"
+clawp --client kimi --skills-dir ./my-skills "use my custom tools"
 ```
 
 The answer prints to stdout; a clean run is silent on stderr (only errors and degraded turns are reported there). The session-id is in the JSON output and in `clawp.sqlite`, so you can `--resume` later. Every turn is logged.
@@ -79,13 +81,16 @@ $ clawp --resume 9dc74688-c41a-4b66-bddf-fddfb56b7da6 "and two more"
 | `--cwd <dir>` | directory the client runs in (default: current); long-form only |
 | `-d, --db <path>` | sqlite log file (default `./clawp.sqlite`) |
 | `--history`, `-n <N>` | view recent logged turns instead of running |
-| `--model`, `--effort`, `--add-dir`, `--system-prompt`, `--permission-mode`, … | passed through to the interactive launch (Claude only; Kimi honors `--model` and `--full-auto` → `--auto`, rejects the rest) |
+| `--model`, `--effort`, `--add-dir`, `--system-prompt`, `--permission-mode`, … | passed through to the interactive launch (Claude only; Kimi honors `--model`, `--full-auto` → `--auto`, and the Kimi-native `--yolo`, `--plan`, `--skills-dir`) |
+| `--yolo` | Kimi only: automatically approve all actions |
+| `--plan` | Kimi only: start in plan mode |
+| `--skills-dir <dir>` | Kimi only: load skills from this directory (repeatable) |
 
-A command line written for `claude -p` runs unchanged with `--client claude` (the default): session flags pass through to the launch; `-p`/`--print`, `--verbose`, and `--no-session-persistence` are accepted and ignored; print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) are rejected with exit 2. With `--client kimi`, only `--model` and `--full-auto` (mapped to `--auto`) are honored; other Claude-only passthrough flags are rejected with exit 2.
+A command line written for `claude -p` runs unchanged with `--client claude` (the default): session flags pass through to the launch; `-p`/`--print`, `--verbose`, and `--no-session-persistence` are accepted and ignored; print-only flags (`--input-format`, `--max-turns`, `--include-partial-messages`, `--fallback-model`, `--json-schema`, `--replay-user-messages`) are rejected with exit 2. With `--client kimi`, only `--model`, `--full-auto` (mapped to `--auto`), and the Kimi-native `--yolo`, `--plan`, and `--skills-dir` flags are honored; other Claude-only passthrough flags are rejected with exit 2.
 
 ## How it works
 
-1. Select the backend with `--client` and generate (or resume) a session. Launch the interactive client (`claude --session-id <uuid> --permission-mode <mode>` or `kimi [--session <id>] [--auto] [--model <alias>]`) in a detached tmux pane (interactive → subscription billing). The one-time trust-folder prompt is cleared with a single Enter for Claude; Kimi session IDs are discovered from the welcome screen or `~/.kimi-code/session_index.jsonl`.
+1. Select the backend with `--client` and generate (or resume) a session. Launch the interactive client (`claude --session-id <uuid> --permission-mode <mode>` or `kimi [--session <id>] [--auto] [--model <alias>] [--yolo] [--plan] [--skills-dir <dir>]`) in a detached tmux pane (interactive → subscription billing). The one-time trust-folder prompt is cleared with a single Enter for Claude; Kimi session IDs are discovered from the welcome screen or `~/.kimi-code/session_index.jsonl`.
 2. Record the current length of the transcript (`~/.claude/projects/*/<session-id>.jsonl` for Claude, `~/.kimi-code/sessions/<workDirKey>/<sessionId>/agents/main/wire.jsonl` for Kimi), then send your prompt **verbatim** via bracketed paste.
 3. Tail the transcript from that offset. Completion is **dual-signalled**: a new terminal record (Claude `assistant` with terminal `stop_reason`; Kimi `step.end` with `finishReason == "end_turn"`) whose text blocks are the answer, or a screen-idle backstop (idle prompt, no spinner, stable) for unknown future stop reasons and dialogs.
 4. Capture the answer, log it to SQLite, and kill the pane on every exit path.

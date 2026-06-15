@@ -115,6 +115,10 @@ PASSTHROUGH_FLAGS = ("--model", "--effort", "--add-dir", "--system-prompt",
 # from PASSTHROUGH_FLAGS because those each carry one value; these carry none.
 BOOL_PASSTHROUGH_FLAGS = ("--disable-slash-commands",)
 
+# Kimi-native flags. Accepted only when --client kimi; rejected for claude.
+KIMI_BOOL_FLAGS = ("--yolo", "--plan")
+KIMI_VALUE_FLAGS = ("--skills-dir",)
+
 
 def tmux(*args, stdin_text=None):
     return subprocess.run(["tmux", *args], input=stdin_text,
@@ -325,7 +329,8 @@ class KimiAdapter:
         if fresh and args.session_id:
             raise CwError(2, "Kimi generates session IDs; do not use --session-id "
                           "for a fresh session (use --resume <id> to continue)")
-        # Only --model is honored as a passthrough; everything else is claude-only.
+        # Only --model is honored as a Claude passthrough; everything else is
+        # claude-only. Kimi-native flags are handled separately below.
         rejected = []
         for flag in PASSTHROUGH_FLAGS:
             if flag == "--model":
@@ -346,6 +351,13 @@ class KimiAdapter:
             out.append("--auto")
         if args.model:
             out += ["--model", args.model]
+        if args.yolo:
+            out.append("--yolo")
+        if args.plan:
+            out.append("--plan")
+        if args.skills_dir:
+            for d in args.skills_dir:
+                out += ["--skills-dir", d]
         return out
 
     @staticmethod
@@ -1201,6 +1213,14 @@ def build_parser():
     ap.add_argument("--session-id")
     ap.add_argument("--full-auto", action="store_true",
                     help="bypassPermissions/auto mode (default acceptEdits)")
+    # Kimi-native flags (rejected when --client claude).
+    ap.add_argument("--yolo", action="store_true",
+                    help="Kimi only: automatically approve all actions")
+    ap.add_argument("--plan", action="store_true",
+                    help="Kimi only: start in plan mode")
+    ap.add_argument("--skills-dir", action="append",
+                    help="Kimi only: load skills from this directory "
+                         "(can be repeated)")
     # No -c alias: -c/--continue is out of scope, so it must not silently bind
     # to --cwd. --cwd stays long-form only.
     ap.add_argument("--cwd", default=os.getcwd())
@@ -1230,6 +1250,13 @@ def _check_unsupported_flags(args):
     if args.include_partial_messages and args.output_format != "stream-json":
         raise CwError(2, "--include-partial-messages requires "
                       "--output-format stream-json")
+    # Kimi-native flags only make sense for the Kimi backend.
+    if args.client != "kimi":
+        for flag in KIMI_BOOL_FLAGS:
+            if getattr(args, flag.lstrip("-").replace("-", "_")):
+                raise CwError(2, f"{flag}: only available with --client kimi")
+        if args.skills_dir is not None:
+            raise CwError(2, "--skills-dir: only available with --client kimi")
 
 
 def main():
