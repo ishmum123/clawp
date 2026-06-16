@@ -104,6 +104,8 @@ Stored columns: `id, ts, session, prompt, reply, seconds, low_fidelity, timed_ou
 - **Sweet spot is Q&A and light, mostly-edit tasks.** Tool-using turns work, but `clawp` reconstructs against a TUI what `claude -p --output-format stream-json` gives natively; the more autonomous the work, the more the fragility shows.
 - **Per-call launch latency.** Each call spins up an ephemeral pane and waits for the idle prompt (a warm pool for the resume path is on the roadmap).
 - **If a permission prompt appears** (restrictive config, no `--full-auto`), the turn is reported `blocked` (exit 3) rather than answered. Use `--full-auto` for unattended runs that touch web/bash. The first `--full-auto` launch on a machine that has never accepted bypass mode auto-clears the one-time Bypass-Permissions warning.
+- **`--allowedTools` accepts a single argument.** Unlike the bare `claude` CLI, which accepts multiple space-separated patterns, `clawp` argparse only reads one value. Pass a comma-separated list in one quoted string, e.g. `--allowedTools "Bash(git *),Read(**)"`.
+- **No true restricted sandbox yet.** `--allowedTools` is forwarded, but unattended use still requires `--full-auto`/`--permission-mode bypassPermissions`, which bypasses all permission checks. For now, callers who need a restricted tool surface should either use the bare `claude` CLI (subscription billing does not apply) or run `clawp` inside an OS-level sandbox.
 - **No token-level partials.** The transcript stores whole messages, so `--include-partial-messages` is accepted but a no-op (the answer lands in one chunk).
 - **Don't scrub clawp's env.** It runs interactive `claude` for auth — spawn it with a restricted env (allowlist, systemd, sandbox) and it can't find your login (`Not logged in`). Include `HOME PATH USER SHELL LANG TERM`.
 - **One turn at a time per pane** — a concurrent run against the same session fails fast; distinct session-ids run in parallel.
@@ -116,6 +118,10 @@ Stored columns: `id, ts, session, prompt, reply, seconds, low_fidelity, timed_ou
 - Capture the work product (git diff / files touched), not just the final message
 - Handle context autocompaction and rate-limit waits explicitly
 - Retry/backoff on errors instead of timing out
+- Support unattended runs with `--permission-mode auto` + `--allowedTools`
+  without requiring `--full-auto`. Today any permission/trust dialog is reported
+  as `blocked` (exit 3); clawp should auto-approve tool use that matches the
+  supplied `--allowedTools` patterns so callers can run restricted sandboxes.
 
 ## License
 
