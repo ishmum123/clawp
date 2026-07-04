@@ -45,6 +45,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 
@@ -111,6 +112,13 @@ PASSTHROUGH_FLAGS = ("--model", "--effort", "--add-dir", "--system-prompt",
                      "--append-system-prompt", "--allowedTools",
                      "--disallowedTools", "--tools", "--permission-mode",
                      "--mcp-config", "--agents", "--settings")
+# These two carry unbounded-length text and are sent to `claude` as a temp file
+# (its `--*-file` variant) instead of inline: tmux new-session ships the whole
+# launch command through its client<->server control channel in one message,
+# which has a hard ceiling (~16KB, measured) — an inline system prompt near or
+# past that silently fails the launch ("command too long", no session created),
+# and clawp then just times out waiting on a pane that never existed.
+FILE_BACKED_FLAGS = ("--system-prompt", "--append-system-prompt")
 # Boolean session flags: forwarded as a bare flag (no value) when set. Separate
 # from PASSTHROUGH_FLAGS because those each carry one value; these carry none.
 BOOL_PASSTHROUGH_FLAGS = ("--disable-slash-commands",)
@@ -358,7 +366,7 @@ class KimiAdapter:
         if args.skills_dir:
             for d in args.skills_dir:
                 out += ["--skills-dir", d]
-        return out
+        return out, []
 
     @staticmethod
     def find_transcript(session_id, cwd=None, index_path=None):
@@ -845,11 +853,26 @@ class CwError(SystemExit):
         self.meta = meta            # carried so a caller's per-turn log keeps it
 
 
-def _passthrough_args(args):
+def _write_prompt_file(flag, val):
+    # 0600, owner-private tmp dir (mkstemp's default) — never the repo or a
+    # shared path. Named after the flag only for readability in `ps`/logs.
+    fd, path = tempfile.mkstemp(prefix=f"clawp-{flag.lstrip('-')}-", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(val)
+    return path
+
+
+def _passthrough_args(args, tmp_files):
     out = []
     for flag in PASSTHROUGH_FLAGS:
         val = getattr(args, flag.lstrip("-").replace("-", "_"))
-        if val is not None:
+        if val is None:
+            continue
+        if flag in FILE_BACKED_FLAGS:
+            path = _write_prompt_file(flag, val)
+            tmp_files.append(path)
+            out += [flag + "-file", path]
+        else:
             out += [flag, val]
     for flag in BOOL_PASSTHROUGH_FLAGS:
         if getattr(args, flag.lstrip("-").replace("-", "_")):
@@ -864,8 +887,9 @@ def _launch_args(args, session_id, fresh):
     # explicit --permission-mode passthrough overrides the default mode.
     if args.permission_mode is None:
         claude_args += ["--permission-mode", mode]
-    claude_args += _passthrough_args(args)
-    return claude_args
+    tmp_files = []
+    claude_args += _passthrough_args(args, tmp_files)
+    return claude_args, tmp_files
 
 
 def _init_event(session_id, model, cwd):
@@ -1024,21 +1048,35 @@ def _run_turn(name, session_id, path, prompt, fmt, stream, client, cwd):
 
 
 def _build_session(args, client):
-    """Return (session_id, launch_args) for ensure_session.
+    """Return (session_id, launch_args, tmp_files) for ensure_session.
 
     Claude pre-assigns a UUID; Kimi generates its own ID and is discovered later.
+    tmp_files are prompt-file paths (empty for Kimi) the caller must remove once
+    the launch has settled (see run_print_turn / run_stream_turns).
     """
     fresh = args.resume is None
     if client.CLIENT.name == "claude":
         session_id = args.session_id or args.resume or str(uuid.uuid4())
-        return session_id, client.launch_args(args, session_id, fresh)
+        launch_args, tmp_files = client.launch_args(args, session_id, fresh)
+        return session_id, launch_args, tmp_files
     # Kimi
     if fresh:
         if args.session_id:
             raise CwError(2, "Kimi generates session IDs; do not use --session-id "
                           "for a fresh session (use --resume <id> to continue)")
-        return None, client.launch_args(args, None, fresh)
-    return args.resume, client.launch_args(args, args.resume, fresh)
+        launch_args, tmp_files = client.launch_args(args, None, fresh)
+        return None, launch_args, tmp_files
+    launch_args, tmp_files = client.launch_args(args, args.resume, fresh)
+    return args.resume, launch_args, tmp_files
+
+
+def _cleanup_tmp_files(paths):
+    # Safe to remove once ensure_session has settled (success or launch-timeout):
+    # claude reads a prompt file at startup, before the pane ever reaches idle,
+    # and a launch that failed outright never read it at all.
+    for path in paths:
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(path)
 
 
 def _pane_name(client, session_id):
@@ -1054,7 +1092,7 @@ def _pane_name(client, session_id):
 
 def run_print_turn(args, cwd, db_path):
     client = get_client(args.client)
-    session_id, launch_args = _build_session(args, client)
+    session_id, launch_args, tmp_files = _build_session(args, client)
 
     fmt = args.output_format
     stream = fmt == "stream-json"
@@ -1072,6 +1110,8 @@ def run_print_turn(args, cwd, db_path):
                                                        launch_args, session_id)
             except TimeoutError as e:
                 raise CwError(5, str(e), meta=_meta(False, True, note="launch failed"))
+            finally:
+                _cleanup_tmp_files(tmp_files)
             path = path_hint or client.find_transcript(session_id, cwd)
             answer, meta, path = _run_turn(name, session_id, path, args.prompt,
                                            fmt, stream, client, cwd)
@@ -1108,7 +1148,7 @@ def run_stream_turns(args, cwd, db_path):
     # pane when stdin closes (EOF = conversation over). A blocked/stalled turn ends
     # the session: the dialog owns the pane and clawp can't answer it.
     client = get_client(args.client)
-    session_id, launch_args = _build_session(args, client)
+    session_id, launch_args, tmp_files = _build_session(args, client)
     model = args.model or "default"
     turns = 0
     name = _pane_name(client, session_id)
@@ -1119,6 +1159,8 @@ def run_stream_turns(args, cwd, db_path):
                                                        launch_args, session_id)
             except TimeoutError as e:
                 raise CwError(5, str(e))
+            finally:
+                _cleanup_tmp_files(tmp_files)
             print(json.dumps(_init_event(session_id, model, cwd)), flush=True)
             path = path_hint or client.find_transcript(session_id, cwd)
             # readline (not `for line in sys.stdin`) so each turn is processed as
