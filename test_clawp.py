@@ -270,20 +270,20 @@ _args = _parser.parse_args(
     ["--verbose", "--no-session-persistence", "--model", "opus", "hi"])
 check("no-op flags parse without error", _args.prompt == "hi")
 check("no-op flags are not forwarded to the launch",
-      clawp._passthrough_args(_args) == ["--model", "opus"])
+      clawp._passthrough_args(_args, []) == ["--model", "opus"])
 
 # --tools (built-in tool allowlist) is a session flag (no print-only note in
 # `claude --help`), so it's forwarded to the interactive launch verbatim. Like
 # its --allowedTools/--add-dir siblings, the value is one token (comma-separated).
 check("--tools is forwarded to the launch",
       clawp._passthrough_args(
-          clawp.build_parser().parse_args(["--tools", "Bash,Edit", "hi"]))
+          clawp.build_parser().parse_args(["--tools", "Bash,Edit", "hi"]), [])
       == ["--tools", "Bash,Edit"])
 # `--tools ""` is claude's "disable the built-in toolset" (Skill/LSP still load).
 # The empty string must reach claude verbatim — absent (None) is dropped, "" is not.
 check("--tools empty-string is forwarded verbatim, not dropped like absent (None)",
       clawp._passthrough_args(
-          clawp.build_parser().parse_args(["--tools", "", "hi"]))
+          clawp.build_parser().parse_args(["--tools", "", "hi"]), [])
       == ["--tools", ""])
 
 # --disable-slash-commands ("Disable all skills") has no print-only note in
@@ -293,10 +293,30 @@ check("--disable-slash-commands parses as a boolean flag defaulting off",
       clawp.build_parser().parse_args(["hi"]).disable_slash_commands is False)
 check("--disable-slash-commands is forwarded as a bare flag (no value)",
       clawp._passthrough_args(
-          clawp.build_parser().parse_args(["--disable-slash-commands", "hi"]))
+          clawp.build_parser().parse_args(["--disable-slash-commands", "hi"]), [])
       == ["--disable-slash-commands"])
 check("--disable-slash-commands absent is not forwarded",
-      clawp._passthrough_args(clawp.build_parser().parse_args(["hi"])) == [])
+      clawp._passthrough_args(clawp.build_parser().parse_args(["hi"]), []) == [])
+
+# --system-prompt / --append-system-prompt go out as a temp file, not inline:
+# tmux new-session ships the whole launch command through one control-channel
+# message with a hard size ceiling (~16KB, measured), so a large inline prompt
+# can silently fail the launch. The `-file` variant sidesteps that entirely.
+_tmp_files = []
+_sp_args = clawp._passthrough_args(
+    clawp.build_parser().parse_args(["--append-system-prompt", "be terse", "hi"]),
+    _tmp_files)
+check("--append-system-prompt is forwarded as a -file flag",
+      _sp_args[0] == "--append-system-prompt-file")
+check("--append-system-prompt's temp file is tracked for cleanup",
+      len(_tmp_files) == 1 and _sp_args[1] == _tmp_files[0])
+check("--append-system-prompt's temp file holds the prompt text verbatim",
+      open(_tmp_files[0], encoding="utf-8").read() == "be terse")
+clawp._cleanup_tmp_files(_tmp_files)
+check("_cleanup_tmp_files removes the file",
+      not os.path.exists(_tmp_files[0]))
+check("_cleanup_tmp_files tolerates an already-removed file",
+      clawp._cleanup_tmp_files(_tmp_files) is None)
 
 # The idle backstop only decides a turn when no terminal transcript record
 # arrives; its stable window (STABLE_NEEDED * POLL) must outlast a natural
@@ -452,7 +472,7 @@ check("--include-partial-messages defaults off",
       clawp.build_parser().parse_args(["hi"]).include_partial_messages is False)
 check("--include-partial-messages is not forwarded to the launch",
       clawp._passthrough_args(clawp.build_parser().parse_args(
-          ["--include-partial-messages", "--output-format", "stream-json", "hi"]))
+          ["--include-partial-messages", "--output-format", "stream-json", "hi"]), [])
       == [])
 
 def _flag_check_code(argv):
@@ -626,7 +646,8 @@ os.unlink(MOCK_INDEX)
 
 # launch args
 def _kimi_launch(argv):
-    return KIMI.launch_args(clawp.build_parser().parse_args(argv), None, True)
+    args, _tmp = KIMI.launch_args(clawp.build_parser().parse_args(argv), None, True)
+    return args
 
 def _kimi_check_code(argv):
     real = sys.stderr
@@ -650,7 +671,7 @@ check("kimi rejects claude-only --effort",
 check("kimi resume uses --session <id>",
       KIMI.launch_args(clawp.build_parser().parse_args(
           ["--client", "kimi", "--resume", "session_abc", "hi"]),
-          "session_abc", False) == ["--session", "session_abc"])
+          "session_abc", False) == (["--session", "session_abc"], []))
 
 # Kimi-native flags
 _check_default = clawp.build_parser().parse_args(["hi"])
