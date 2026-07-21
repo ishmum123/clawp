@@ -44,6 +44,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import tempfile
 import sys
 import tempfile
 import time
@@ -54,7 +55,9 @@ STABLE_NEEDED = 5       # identical captures => quiet; *POLL must outlast a
                         # natural mid-turn streaming pause (~2.4s measured)
 STALL_SECS = 180        # screen unchanged this long (e.g. frozen spinner) => hang
 MAX_TURN = 1800         # absolute per-turn cap (seconds)
-READY_TIMEOUT = 45      # seconds to reach the idle prompt after launch
+READY_TIMEOUT = int(os.environ.get("CLAWP_READY_TIMEOUT", "45"))
+                        # seconds to reach the idle prompt after launch; override
+                        # via env on slow hosts (e.g. phones under proot need 240+)
 SEND_SETTLE = 0.8       # pause after send_text before polling for a reply
 PANE_W, PANE_H = 220, 50
 OUTPUT_TOKEN_FLOOR = 64000  # floor for the pane's CLAUDE_CODE_MAX_OUTPUT_TOKENS
@@ -128,6 +131,15 @@ KIMI_BOOL_FLAGS = ("--yolo", "--plan")
 KIMI_VALUE_FLAGS = ("--skills-dir",)
 
 
+# Each clawp process gets a private tmux server. Sharing the default socket
+# across invocations breaks under uid-emulating environments (proot): a client
+# from a new instance can get "access not allowed" from a server started by an
+# earlier one, and orphaned servers from killed runs poison later connections.
+_TMUX_SOCK_DIR = os.path.join(tempfile.gettempdir(), f"clawp-sock-{os.getpid()}")
+os.makedirs(_TMUX_SOCK_DIR, exist_ok=True)
+os.environ["TMUX_TMPDIR"] = _TMUX_SOCK_DIR
+
+
 def tmux(*args, stdin_text=None):
     return subprocess.run(["tmux", *args], input=stdin_text,
                           capture_output=True, text=True)
@@ -138,7 +150,16 @@ def has_session(name):
 
 
 def capture(name):
-    return tmux("capture-pane", "-p", "-S", "-", "-t", name).stdout
+    # A failed capture must not read as a blank-but-healthy screen: returning ""
+    # on error made tmux client failures look like a frozen pane, surfacing 180s
+    # later as a bogus "stall". Retry transient blips, then fail loudly.
+    for attempt in range(3):
+        r = tmux("capture-pane", "-p", "-S", "-", "-t", name)
+        if r.returncode == 0:
+            return r.stdout
+        time.sleep(POLL)
+    raise CwError(4, "tmux capture failed: " + (r.stderr.strip() or "unknown error"),
+                  meta=_meta(False, True, note="capture-failed"))
 
 
 def bottom_lines(screen, n=12):
